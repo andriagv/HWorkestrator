@@ -5,7 +5,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, filters
 
-from . import pipeline
+from . import pipeline, pricing
 from .config import settings
 from .registry import SKILLS, SUBJECTS
 from .weeks import int_to_roman
@@ -72,6 +72,12 @@ async def on_home(update: Update, ctx):
     await q.edit_message_text("აირჩიე საგანი:", reply_markup=kb(rows))
 
 
+def skill_rows(subject):
+    rows = [(label, f"skill:{k}") for k, label in SKILLS.items()]
+    rows.append(("⬅️ კვირები", f"subj:{subject}"))
+    return rows
+
+
 @owner_only
 async def on_week(update: Update, ctx):
     q = update.callback_query
@@ -87,6 +93,8 @@ async def on_week(update: Update, ctx):
     except Exception as e:
         log.exception("overview failed")
         return await q.edit_message_text(f"❌ {e}\n\n/start")
+    ctx.user_data["ov"] = ov
+    ctx.user_data.pop("chosen", None)
     await q.edit_message_text(f"{ov.title}\n\n{ov.text}")
     for f in ov.files:
         with open(f, "rb") as fh:
@@ -94,37 +102,96 @@ async def on_week(update: Update, ctx):
     if not ov.has_content:
         return await q.message.reply_text(
             "დავალება ჯერ არ არის.", reply_markup=kb([("⬅️ კვირები", f"subj:{subject}")]))
-    rows = [(label, f"skill:{k}") for k, label in SKILLS.items()]
-    rows.append(("⬅️ კვირები", f"subj:{subject}"))
-    await q.message.reply_text("რომელი skill გამოვიყენო?", reply_markup=kb(rows))
+    if len(ov.files) > 1:        # several candidates -> let the user pick the source
+        rows = [(f"📄 {f.name}", f"src:{i}") for i, f in enumerate(ov.files)]
+        rows.append(("📚 ყველა ფაილი ერთად", "src:all"))
+        return await q.message.reply_text("რომელი ფაილია დავალების წყარო?", reply_markup=kb(rows))
+    ctx.user_data["chosen"] = list(ov.files)
+    await q.message.reply_text("რომელი skill გამოვიყენო?", reply_markup=kb(skill_rows(subject)))
+
+
+@owner_only
+async def on_source(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
+    ov = ctx.user_data.get("ov")
+    if not ov:
+        return await q.edit_message_text("დაწერე /start")
+    pick = q.data.split(":", 1)[1]
+    chosen = list(ov.files) if pick == "all" else [ov.files[int(pick)]]
+    ctx.user_data["chosen"] = chosen
+    names = ", ".join(f.name for f in chosen)
+    await q.edit_message_text(f"წყარო: {names}\n\nრომელი skill გამოვიყენო?",
+                              reply_markup=kb(skill_rows(ctx.user_data["subject"])))
 
 
 @owner_only
 async def on_skill(update: Update, ctx):
     q = update.callback_query
     await q.answer()
-    subject, week = ctx.user_data.get("subject"), ctx.user_data.get("week")
-    if not subject or not week:
+    subject, ov = ctx.user_data.get("subject"), ctx.user_data.get("ov")
+    if not subject or not ov:
         return await q.edit_message_text("დაწერე /start")
     skill = q.data.split(":", 1)[1]
+    ctx.user_data["skill"] = skill
+    if skill not in pricing.LLM_SKILLS:                 # cppwork: no model, no cost
+        return await generate(q, ctx, skill)
+    await q.edit_message_text("⏳ ფასს ვითვლი (Haiku 5.5)…")
+    try:
+        est, note = await asyncio.to_thread(pipeline.estimate, ov, skill, ctx.user_data.get("chosen"))
+    except Exception as e:
+        log.exception("estimate failed")
+        return await q.edit_message_text(f"❌ {e}\n/start")
+    default_id = settings.anthropic_model
+    rows = [(f"{pricing.MODELS[k]['emoji']} {name} — ≈ {pricing.fmt_usd(usd)}"
+             + (" ⭐" if pricing.MODELS[k]["id"] == default_id else ""), f"mdl:{k}") for k, name, usd in est]
+    rows.append(("⬅️ უკან", f"subj:{subject}"))
+    await q.edit_message_text(
+        "რომელი მოდელით დავწერო?\n≈ სავარაუდო ფასი ამ დავალებაზე; ზუსტს შესრულების შემდეგ დაგიწერ "
+        f"(შეცდომის გასწორებისას შეიძლება მეტი გამოვიდეს).\n{note}", reply_markup=kb(rows))
+
+
+@owner_only
+async def on_model(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
+    skill = ctx.user_data.get("skill")
+    if not skill or not ctx.user_data.get("ov"):
+        return await q.edit_message_text("დაწერე /start")
+    await generate(q, ctx, skill, q.data.split(":", 1)[1])
+
+
+
+
+async def generate(q, ctx, skill, model=None):
+    """Run the skill (in a thread) and show the result; `q` is the callback query to edit."""
+    subject, ov = ctx.user_data.get("subject"), ctx.user_data.get("ov")
     await q.edit_message_text("⏳ ვაგენერირებ…")
     try:
-        job = await asyncio.to_thread(pipeline.prepare, subject, skill, week)
+        job = await asyncio.to_thread(pipeline.prepare, ov, skill, ctx.user_data.get("chosen"), model)
     except Exception as e:  # show the reason, keep the bot alive
         log.exception("prepare failed")
         return await q.edit_message_text(
             f"❌ {e}", reply_markup=kb([("⬅️ კვირები", f"subj:{subject}")]))
     ctx.user_data["job"] = job
-    await q.edit_message_text(f"📄 მზადაა ({job.info.splitlines()[0]})")
+    await q.edit_message_text(f"📄 მზადაა ({job.info.splitlines()[0]})\n{job.cost_note}")
     for f in [job.upload_file, *job.extra_files]:
         with open(f, "rb") as fh:
             await q.message.reply_document(fh, filename=f.name)
-    existing = job.target.get("existing")
-    warn = (f"\n⚠️ ამჟამად უკვე ატვირთულია: {', '.join(existing)} — ახალი ფაილი ჩაანაცვლებს."
-            if existing else "")
-    await q.message.reply_text(
-        "ატვირთვა დავალების ადგილას?" + warn,
-        reply_markup=kb([("✅ ატვირთე", "ok"), ("❌ გაუქმება", "no")]))
+    targets = job.targets
+    if not targets:
+        return await q.message.reply_text("⚠️ ამ კვირაში დავალების ადგილი (assignment) არ არის — ატვირთვა შეუძლებელია.\n/start")
+    lines = []
+    for t in targets:
+        ex = t.get("existing")
+        lines.append(f"• {t.get('label', '')}" + (f" — უკვე ატვირთულია: {', '.join(ex)} (ჩაანაცვლებს)" if ex else " — ცარიელია"))
+    if len(targets) == 1:
+        rows = [("✅ ატვირთე", "ok:0"), ("❌ გაუქმება", "no")]
+        text = "ატვირთვა დავალების ადგილას?\n" + "\n".join(lines)
+    else:
+        rows = [(f"✅ {t.get('label', i)}", f"ok:{i}") for i, t in enumerate(targets)] + [("❌ გაუქმება", "no")]
+        text = "რომელ დავალებაში ავტვირთო?\n" + "\n".join(lines)
+    await q.message.reply_text(text, reply_markup=kb(rows))
 
 
 @owner_only
@@ -135,6 +202,10 @@ async def on_decision(update: Update, ctx):
     if q.data == "no" or not job:
         ctx.user_data.clear()
         return await q.edit_message_text("გაუქმდა. /start")
+    idx = int(q.data.split(":", 1)[1])
+    if idx >= len(job.targets):
+        return await q.edit_message_text("ატვირთვის ადგილი ვერ ვიპოვე. /start")
+    job.target = job.targets[idx]
     await q.edit_message_text("⏳ ვტვირთავ…")
     try:
         result = await asyncio.to_thread(pipeline.submit, job)
@@ -154,8 +225,10 @@ def build_app():
     app.add_handler(CallbackQueryHandler(on_subject, pattern=r"^subj:"))
     app.add_handler(CallbackQueryHandler(on_home, pattern=r"^home$"))
     app.add_handler(CallbackQueryHandler(on_week, pattern=r"^wk:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_source, pattern=r"^src:(\d+|all)$"))
     app.add_handler(CallbackQueryHandler(on_skill, pattern=r"^skill:"))
-    app.add_handler(CallbackQueryHandler(on_decision, pattern=r"^(ok|no)$"))
+    app.add_handler(CallbackQueryHandler(on_model, pattern=r"^mdl:\w+$"))
+    app.add_handler(CallbackQueryHandler(on_decision, pattern=r"^(ok:\d+|no)$"))
     return app
 
 
