@@ -25,4 +25,5 @@ SUBJECTS = {
 SKILLS = {
     "cppwork": "💻 cppwork — ლექციის კოდები → Word",
     "latexwork": "📐 latexwork — ამოცანები → LaTeX + PDF",
+    "jupiterwork": "📓 jupiterwork — დავალება → Jupyter notebook (.ipynb)",
 }
