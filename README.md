@@ -17,6 +17,7 @@ bot → uploads it into the assignment slot
 Skills (in `hworkestrator/skills/`, also usable standalone in Claude Code):
 - **cppwork** — lecture `.pptx` → Word with the "საილუსტრაციო მაგალითი" code, compile-checked, with generated screenshots. No LLM needed.
 - **latexwork** — assignment → Claude solves it → LaTeX → PDF (XeLaTeX).
+- **jupiterwork** — data-science assignment → Claude writes the notebook, it is executed (with plots), then the Georgian explanations are rewritten from the real outputs → `.ipynb`.
 
 Add a subject or skill: edit `hworkestrator/registry.py` (+ a branch in `pipeline.py` for new skill types).
 
