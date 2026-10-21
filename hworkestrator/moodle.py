@@ -62,23 +62,22 @@ class Moodle:
         return [n for n, _ in week_sections(self.contents(course["id"]))]
 
     def week(self, course_match, week):
-        """-> dict(course, section, lecture(module|None), assign(module|None), assignment(dict|None))."""
+        """-> dict(course, section, resources[module], assigns[{module, assignment}]).
+        `resources` = every file/folder activity of the week; `assigns` = every assignment activity
+        (e.g. "დავალება", "პრაქტიკული 4") with its details (text, attachments, id)."""
         course = self.find_course(course_match)
         section = find_week_section(self.contents(course["id"]), week)
         if section is None:
             raise MoodleError(f"{week}-ე კვირა ვერ ვიპოვე კურსში '{course['fullname']}'")
-        mods = section.get("modules", [])
-        lecture = pick_lecture(mods)
-        assign = pick_assign(mods)
-        assignment = None
-        if assign:
-            data = self.call("mod_assign_get_assignments", **{"courseids[0]": course["id"]})
-            for c in data.get("courses", []):
-                for a in c.get("assignments", []):
-                    if a.get("cmid") == assign["id"]:
-                        assignment = a
-        return {"course": course, "section": section, "lecture": lecture, "assign": assign,
-                "assignment": assignment}
+        mods = [m for m in section.get("modules", []) if m.get("uservisible", True)]
+        data = self.call("mod_assign_get_assignments", **{"courseids[0]": course["id"]})
+        by_cmid = {a["cmid"]: a for c in data.get("courses", []) for a in c.get("assignments", [])}
+        return {
+            "course": course, "section": section,
+            "resources": [m for m in mods if m.get("modname") in ("resource", "folder")],
+            "assigns": [{"module": m, "assignment": by_cmid.get(m["id"])}
+                        for m in mods if m.get("modname") == "assign"],
+        }
 
     def download(self, fileurl, dest):
         dest = Path(dest)
@@ -120,20 +119,7 @@ class Moodle:
         return itemid
 
 
-def pick_lecture(modules):
-    files = [m for m in modules if m.get("modname") == "resource"]
-    pref = [m for m in files if re.search(r"lecture|ლექცია", m.get("name", ""), re.I)]
-    return (pref or files or [None])[0]
-
-
-def pick_assign(modules):
-    assigns = [m for m in modules if m.get("modname") == "assign"]
-    pref = [m for m in assigns if "დავალება" in m.get("name", "")]
-    return (pref or assigns or [None])[0]
-
-
-def lecture_file_url(module):
-    for c in (module or {}).get("contents", []):
-        if c.get("type") == "file":
-            return c["fileurl"], c["filename"]
-    return None, None
+def module_files(module):
+    """[(fileurl, filename)] of a file/folder activity."""
+    return [(c["fileurl"], c["filename"]) for c in (module or {}).get("contents", [])
+            if c.get("type") == "file"]
