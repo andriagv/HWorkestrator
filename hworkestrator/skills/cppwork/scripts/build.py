@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""Lecture .pptx -> assignment .docx.
+
+Extracts every "საილუსტრაციო მაგალითი_N" (condition + C++ code) from the
+slides, tidies the code, syntax-checks it with g++, and fills the Word
+template (header untouched except week number and today's date; output
+boxes left empty).
+
+usage: build.py LECTURE.pptx --week "V" [--out OUT.docx] [--date DD.MM.YYYY]
+       [--student NAME --group GROUP --course COURSE]   (or env STUDENT_NAME / STUDENT_GROUP / COURSE_NAME)
+"""
+import argparse, datetime, html, os, re, shutil, subprocess, sys, tempfile, zipfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ASSETS = os.path.join(HERE, "..", "assets")
+
+EXAMPLE_RE = re.compile(r"საილუსტრაციო\s*მაგალითი\s*_?\s*(\d+)\s*[:：]\s*(.*)", re.S)
+STOP_RE = re.compile(r"^\s*(შედეგი|პროგრამული\s+კოდი|კოდი\s*-|Output|პროფ\.|(ორშაბათი|სამშაბათი|ოთხშაბათი|ხუთშაბათი|პარასკევი|შაბათი|კვირა),)", re.I)
+TYPES = {"int", "float", "double", "char", "long", "short", "unsigned", "signed", "void", "bool", "auto", "const"}
+
+
+# ---------- pptx extraction ----------
+def slide_paragraphs(z):
+    names = sorted((n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+                   key=lambda n: int(re.findall(r"\d+", n)[0]))
+    for n in names:
+        x = z.read(n).decode("utf8")
+        paras = []
+        for p in re.findall(r"<a:p>.*?</a:p>|<a:p [^>]*>.*?</a:p>", x, flags=re.S):
+            p = re.sub(r"<a:br\s*/?>", "\n", p)
+            t = html.unescape("".join(re.findall(r"<a:t>([^<]*)</a:t>|(\n)", p) and
+                                      [a or b for a, b in re.findall(r"<a:t>([^<]*)</a:t>|(\n)", p)]))
+            paras.extend(t.replace("\xa0", " ").split("\n"))
+        yield paras
+
+
+
+def clean_slide_line(line):
+    """Drop slide-annotation artifacts: unbalanced /* or */ and stray Georgian labels after code."""
+    if "/*" in line and "*/" not in line:
+        line = line[:line.index("/*")]
+    elif "*/" in line and "/*" not in line:
+        line = line.replace("*/", "")
+    code, comment = split_comment(line)
+    code = re.sub(r"(;)\s+[^\x00-\x7F].*$", r"\1", code)
+    code = re.sub(r"(\b\w+(?:\s+\*?\w+)?\s*;)\s+[^\x00-\x7F][^\"]*$", r"\1", code) if code.strip() and not comment else code
+    return (code + ("    " + comment if comment else "")).rstrip()
+
+
+
+CODE_LABEL_RE = re.compile(r"^\s*კოდი\s*-?\s*code\b", re.I)
+CODEY_RE = re.compile(r"[;{}]\s*(//.*)?$|^\s*#\s*include|^\s*(int|float|double|char|string|void|struct|using|for|while|if|return)\b")
+
+
+def collect_code(lines, labelled=False):
+    """Code from a slide's text lines.
+    Normal slide: from the first #include until main() is closed (must contain main, so that
+    "#include <stack>" in explanatory prose is ignored).
+    Slide carrying the "კოდი code" label: the whole code listing, even without main."""
+    code, depth, started = [], 0, False
+    for line in lines:
+        if not started:
+            if re.match(r"\s*#\s*include", line) or (labelled and CODEY_RE.search(line)):
+                started = True
+            else:
+                continue
+        if STOP_RE.match(line) or CODE_LABEL_RE.match(line):
+            break
+        line = clean_slide_line(line)
+        if not line.strip():
+            continue
+        code.append(line)
+        code_only = split_comment(line)[0]
+        depth += code_only.count("{") - code_only.count("}")
+        if re.search(r"\bmain\b", " ".join(code)) and depth <= 0 and "}" in code_only:
+            break
+    if labelled:
+        # drop trailing non-code lines (printed output etc.)
+        while code and not CODEY_RE.search(code[-1]):
+            code.pop()
+        return code
+    return code if re.search(r"\bmain\b", " ".join(code)) else []
+
+
+def extract_unmarked(pptx):
+    """Lectures without 'საილუსტრაციო მაგალითი' labels: take every code block, title it by the
+    nearest preceding section-heading slide."""
+    z = zipfile.ZipFile(pptx)
+    out, heading, n = [], "", 0
+    for paras in slide_paragraphs(z):
+        body = [p for p in paras if p.strip() and not p.strip().startswith("პროფ.")]
+        labelled = any(CODE_LABEL_RE.match(l) for l in paras)
+        code = collect_code(paras, labelled)
+        if code:
+            n += 1
+            title = f"{heading}: " if heading else ""
+            out.append({"n": n, "cond": f"{title}ლექციაში მოცემული პროგრამა (კოდი და შედეგი).".strip(),
+                        "code": code})
+        elif 1 <= len(body) <= 2 and len(body[0].strip()) <= 40 and not re.search(r"თ\s*ე\s*მ\s*ა|გმადლობთ|რეზიუმე", body[0]):
+            heading = body[0].strip()
+    return out
+
+
+def extract(pptx):
+    z = zipfile.ZipFile(pptx)
+    examples, cur, in_code = [], None, False
+    for paras in slide_paragraphs(z):
+        for line in paras:
+            m = EXAMPLE_RE.match(line.strip())
+            if m:
+                cur = {"n": int(m.group(1)), "cond": re.sub(r"\s+", " ", m.group(2)).strip(), "code": []}
+                examples.append(cur)
+                in_code = False
+                continue
+            if cur is None:
+                continue
+            if not in_code:
+                if re.match(r"\s*#\s*include", line):
+                    in_code = True
+                else:
+                    continue
+            if STOP_RE.match(line):
+                cur = None if cur["code"] else cur
+                in_code = False
+                continue
+            line = clean_slide_line(line)
+            if not line.strip():
+                continue
+            cur["code"].append(line)
+            code_only = split_comment(line)[0]
+            cur["depth"] = cur.get("depth", 0) + code_only.count("{") - code_only.count("}")
+            if re.search(r"\bmain\b", " ".join(cur["code"])) and cur["depth"] <= 0 and "}" in code_only:
+                in_code = False
+                cur = None
+    return [e for e in examples if e["code"]] if examples else []
+
+
+# ---------- code tidying ----------
+def split_comment(line):
+    """-> (code, comment) honouring string literals."""
+    i, q = 0, None
+    while i < len(line):
+        c = line[i]
+        if q:
+            if c == "\\":
+                i += 1
+            elif c == q:
+                q = None
+        elif c in "\"'":
+            q = c
+        elif line.startswith("//", i) or line.startswith("/*", i):
+            return line[:i], line[i:].strip()
+        i += 1
+    return line, ""
+
+
+TOK = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|->|::|[A-Za-z_]\w*|\d+(?:\.\d+)?|\S')
+
+
+def fix_typos(code):
+    code = re.sub(r"<<\s*e\s+ndl\b", "<< endl", code)          # slide typo "e ndl"
+    code = re.sub(r"^(\s*)main\s*\(", r"\1int main(", code)       # main() without a return type
+    return code
+
+
+def tidy_code(code):
+    code = fix_typos(code)
+    toks = TOK.findall(code)
+    out = []
+    prev = None  # previous significant token
+    for t in toks:
+        unary_ctx = prev is None or prev in {"=", "(", ",", "<<", ">>", "+", "-", "*", "/", "{", "return", "==", "!=", "<=", ">=", "&&", "||", "["}
+        if t in {"*", "&"} and unary_ctx:
+            out.append(("sp", t, "nosp_after"))
+        elif t in {"<<", ">>", "=", "==", "!=", "<=", ">=", "&&", "||", "+", "-", "/"}:
+            out.append(("bin", t, ""))
+        elif t == "*" and prev not in TYPES and prev not in {"*"}:
+            out.append(("bin", t, ""))
+        else:
+            out.append(("tok", t, ""))
+        prev = t
+    s = ""
+    for kind, t, flag in out:
+        if kind == "bin":
+            s = s.rstrip() + " " + t + " "
+        elif t == ".":
+            s = s.rstrip() + "."
+        elif s.endswith(".") and t not in {",", ";", ")", "]"} and not s[-2:-1].isdigit() and not t[0].isdigit():
+            s += t
+        elif t in {",", ";"}:
+            s = s.rstrip() + t + (" " if t == "," else "")
+        elif t in {")", "]"}:
+            s = s.rstrip() + t
+        elif t in {"(", "["}:
+            s = s.rstrip() + t if s and re.search(r"[\w\)\]]$", s.rstrip()) and not s.rstrip().endswith(("return", "<<", ">>")) else s + t
+        else:
+            glue = ""
+            if s and not s.endswith((" ", "(", "[", "*", "&", "#")) :
+                glue = " "
+            if s.endswith(("*", "&")) and glue == "" and not s[:-1].endswith((" ", "(", "")):
+                pass
+            s += glue + t if not (s.endswith("#") ) else t
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\b(stack|queue|deque|vector|list|set|map|pair|priority_queue)\s*<\s*([^<>]*?)\s*>",
+               r"\1<\2>", s)
+    s = re.sub(r"^#\s*", "#", s)
+    s = re.sub(r"<\s*(\w+)\s*>", r"<\1>", s) if s.startswith("#include") else s
+    s = re.sub(r"\b(int|float|double|char|long|short|bool|void)\s\*(?=[),])", r"\1*", s)
+    s = s.replace("& ", "&") if re.search(r"= *& ", s) else s
+    return s
+
+
+def tidy(lines):
+    flat = []
+    for line in lines:
+        code, comment = split_comment(line)
+        code = code.strip()
+        if code.startswith("#"):
+            flat.append((re.sub(r"^#\s*include\s*<\s*(\w+)\s*>.*", r"#include <\1>", code), ""))
+            continue
+        # split "int main(){" into Allman style
+        m = re.fullmatch(r"(.*?(?:\)|\b(?:struct|union|class)\s+\w+))\s*\{\s*(.*)", code)
+        if m and m.group(1) and not code.startswith("{"):
+            flat.append((tidy_code(m.group(1)), ""))
+            flat.append(("{", ""))
+            rest = m.group(2).strip()
+            if rest:
+                flat.append((tidy_code(rest), comment)); continue
+            if comment:
+                flat[-1] = ("{", comment)
+            continue
+        flat.append((tidy_code(code) if code else "", comment))
+    out, depth = [], 0
+    for i, (code, comment) in enumerate(flat):
+        if code.startswith("}"):
+            depth = max(depth - 1, 0)
+        text = ("    " * depth + code) if code else ""
+        if comment:
+            text = (text + ("    " if code else "")) + comment if code else "    " * depth + comment
+        out.append(text.rstrip())
+        if code.endswith("{") or code == "{":
+            depth += 1
+        if code == "}" and depth == 0 and i + 1 < len(flat):
+            out.append("")
+        if code.startswith("using namespace") and i + 1 < len(flat) and False:
+            out.append("")
+    return out
+
+
+def syntax_check(lines, label):
+    with tempfile.TemporaryDirectory() as d:
+        f = os.path.join(d, "t.cpp")
+        open(f, "w").write("\n".join(lines) + "\n")
+        r = subprocess.run(["g++", "-fsyntax-only", f], capture_output=True, text=True)
+    ok = r.returncode == 0
+    print(f"  {label}: {'compiles OK' if ok else 'COMPILE ERROR'}")
+    if not ok:
+        print(r.stderr[:600])
+    return ok
+
+
+# ---------- docx ----------
+RPR = ('<w:rFonts w:ascii="Menlo" w:eastAsia="Times New Roman" w:hAnsi="Menlo" w:cs="Menlo"/>'
+       '<w:sz w:val="18"/><w:szCs w:val="18"/><w:lang w:eastAsia="en-GB"/>')
+
+
+def code_par(line):
+    return ('<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:rPr>%s</w:rPr></w:pPr>'
+            '<w:r><w:rPr>%s</w:rPr><w:t xml:space="preserve">%s</w:t></w:r></w:p>'
+            % (RPR, RPR, html.escape(line, quote=False) if line else ""))
+
+
+def shot_xml(rid, idx, w_px, h_px, max_w_cm=13.0, max_h_cm=8.6):
+    w_cm = min(max_w_cm, max_h_cm * w_px / h_px)
+    cx = int(w_cm * 360000)
+    cy = int(cx * h_px / w_px)
+    return ('<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="%d" cy="%d"/>'
+            '<wp:docPr id="%d" name="Screenshot %d"/><wp:cNvGraphicFramePr>'
+            '<a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/>'
+            '</wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            '<pic:nvPicPr><pic:cNvPr id="%d" name="shot%d.png"/><pic:cNvPicPr/></pic:nvPicPr>'
+            '<pic:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+            '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>'
+            '</wp:inline></w:drawing></w:r>') % (cx, cy, 9000 + idx, idx, 9000 + idx, idx, rid, cx, cy)
+
+
+def build_docx(examples, week, date, out, student, group, course):
+    block = open(os.path.join(ASSETS, "task_block.xml"), encoding="utf8").read()
+    parts = []
+    for i, e in enumerate(examples):
+        b = (block.replace("{{N}}", str(e["n"]))
+                  .replace("{{CONDITION}}", html.escape(e["cond"], quote=False))
+                  .replace("{{CODE}}", "".join(code_par(l) for l in e["code"]))
+                  .replace("{{SHOT}}", e.get("shot_xml", "")))
+        if i:
+            b = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' + b
+        parts.append(b)
+    with tempfile.TemporaryDirectory() as d:
+        with zipfile.ZipFile(os.path.join(ASSETS, "template.docx")) as z:
+            z.extractall(d)
+        p = os.path.join(d, "word", "document.xml")
+        s = open(p, encoding="utf8").read()
+        s = (s.replace("{{WEEK}}", html.escape(week, quote=False))
+              .replace("{{STUDENT}}", html.escape(student, quote=False))
+              .replace("{{GROUP}}", html.escape(group, quote=False))
+              .replace("{{COURSE}}", html.escape(course, quote=False))
+              .replace("{{DATE}}", date)
+              .replace("{{TASKS}}", "".join(parts)))
+        open(p, "w", encoding="utf8").write(s)
+        shots = [e for e in examples if e.get("shot")]
+        if shots:
+            os.makedirs(os.path.join(d, "word", "media"), exist_ok=True)
+            rp = os.path.join(d, "word", "_rels", "document.xml.rels")
+            rels = open(rp, encoding="utf8").read()
+            add = ""
+            for e in shots:
+                shutil.copy(e["shot"], os.path.join(d, "word", "media", f"shot{e['n']}.png"))
+                add += ('<Relationship Id="rIdShot%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        'relationships/image" Target="media/shot%d.png"/>' % (e["n"], e["n"]))
+            open(rp, "w", encoding="utf8").write(rels.replace("</Relationships>", add + "</Relationships>"))
+        if os.path.exists(out):
+            os.remove(out)
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            # [Content_Types].xml first
+            names = ["[Content_Types].xml"] + [os.path.relpath(os.path.join(r, f), d)
+                                               for r, _, fs in os.walk(d) for f in fs
+                                               if os.path.relpath(os.path.join(r, f), d) != "[Content_Types].xml"]
+            for n in names:
+                z.write(os.path.join(d, n), n)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("pptx")
+    ap.add_argument("--week", required=True)
+    ap.add_argument("--out")
+    ap.add_argument("--date", default=datetime.date.today().strftime("%d.%m.%Y"))
+    ap.add_argument("--student", default=os.getenv("STUDENT_NAME", ""), help="default: $STUDENT_NAME")
+    ap.add_argument("--group", default=os.getenv("STUDENT_GROUP", ""), help="default: $STUDENT_GROUP")
+    ap.add_argument("--course", default=os.getenv("COURSE_NAME", ""), help="default: $COURSE_NAME")
+    ap.add_argument("--no-shots", action="store_true", help="leave output boxes empty")
+    ap.add_argument("--stdin", action="append", default=[], metavar="N=v1,v2,...",
+                    help="keyboard input for example N, e.g. --stdin 6=2,3,5,7,4,6")
+    a = ap.parse_args()
+
+    missing = [n for n, v in (("student (STUDENT_NAME)", a.student), ("group (STUDENT_GROUP)", a.group),
+                              ("course (COURSE_NAME)", a.course)) if not v]
+    if missing:
+        sys.exit("Missing header data: " + ", ".join(missing) + " — pass --student/--group/--course or set the env vars.")
+    examples = extract(a.pptx)
+    if examples:
+        print(f"Found {len(examples)} examples")
+    else:
+        examples = extract_unmarked(a.pptx)
+        if not examples:
+            sys.exit("ლექციაში კოდი ვერ ვიპოვე (არც 'საილუსტრაციო მაგალითი', არც #include ბლოკი).")
+        print(f"No 'საილუსტრაციო მაგალითი' labels — using {len(examples)} code block(s) found in the slides")
+    bad = 0
+    for e in examples:
+        e["code"] = tidy(e["code"])
+        bad += not syntax_check(e["code"], f"მაგალითი {e['n']}")
+    if not a.no_shots:
+        from PIL import Image
+        import shot
+        inputs = {}
+        for item in a.stdin:
+            k, v = item.split("=", 1)
+            inputs[int(k)] = [x for x in re.split(r"[,\\s]+", v) if x]
+        tmp = tempfile.mkdtemp()
+        for e in examples:
+            png = os.path.join(tmp, f"task{e['n']}.png")
+            try:
+                _, stdout, used = shot.render(e["code"], f"task{e['n']}", png, inputs.get(e["n"]))
+            except Exception as ex:
+                print(f"  მაგალითი {e['n']}: screenshot skipped ({ex})")
+                continue
+            w, h = Image.open(png).size
+            e["shot"] = png
+            e["shot_xml"] = shot_xml(f"rIdShot{e['n']}", e["n"], w, h)
+            note = f" (input: {' '.join(map(str, used))})" if used else ""
+            print(f"  მაგალითი {e['n']}: screenshot OK{note}")
+    out = a.out or os.path.join(os.path.expanduser("~/Desktop"), f"Assignment_{a.week}.docx")
+    build_docx(examples, a.week, a.date, out, a.student, a.group, a.course)
+    print("Saved:", out)
+    if bad:
+        print(f"WARNING: {bad} example(s) did not compile — check them.")
+
+
+if __name__ == "__main__":
+    main()
