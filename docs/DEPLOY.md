@@ -26,7 +26,13 @@ The bot is one Docker image (`Dockerfile`). Two free options:
    ```bash
    bash deploy/push_to_space.sh <hf-user>/<space-name>
    ```
-4. The free Space **sleeps when nobody visits it**, which would stop the bot. Keep it awake: create a free
+4. **Telegram may be blocked on Spaces.** Hugging Face users report that `api.telegram.org` is not reachable from
+   Spaces (the block has changed over time). Check the Space **Logs**: if you see connection/DNS errors to Telegram,
+   use the free Cloudflare proxy:
+   1. cloudflare.com → create a free account → **Workers & Pages → Create → Hello World** → paste
+      `deploy/cloudflare_telegram_proxy.js` → **Deploy** → copy the URL `https://<name>.<you>.workers.dev`.
+   2. In the Space add the **secret** `TELEGRAM_API_BASE` = that URL (no trailing slash) → the Space restarts.
+5. The free Space **sleeps when nobody visits it**, which would stop the bot. Keep it awake: create a free
    [UptimeRobot](https://uptimerobot.com) HTTP monitor for `https://<hf-user>-<space-name>.hf.space` every 5 minutes
    (the bot serves a tiny "alive" page on port 7860 for this).
 
