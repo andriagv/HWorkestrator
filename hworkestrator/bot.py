@@ -219,7 +219,11 @@ async def on_decision(update: Update, ctx):
 def build_app():
     if not settings.telegram_token or not settings.owner_id:
         raise SystemExit("TELEGRAM_BOT_TOKEN და OWNER_TELEGRAM_ID აუცილებელია")
-    app = Application.builder().token(settings.telegram_token).build()
+    builder = Application.builder().token(settings.telegram_token)
+    if settings.telegram_api_base:                       # go through a proxy when Telegram is blocked
+        builder = (builder.base_url(f"{settings.telegram_api_base}/bot")
+                          .base_file_url(f"{settings.telegram_api_base}/file/bot"))
+    app = builder.build()
     owner = filters.User(user_id=settings.owner_id)      # nobody else can use the bot
     app.add_handler(CommandHandler(["start", "new"], start, filters=owner))
     app.add_handler(CallbackQueryHandler(on_subject, pattern=r"^subj:"))

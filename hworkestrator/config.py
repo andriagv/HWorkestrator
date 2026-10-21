@@ -16,6 +16,9 @@ def _bool(name, default=False):
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    # optional reverse proxy for api.telegram.org (some hosts, e.g. Hugging Face Spaces, block Telegram);
+    # e.g. https://tg-proxy.<you>.workers.dev  — see deploy/cloudflare_telegram_proxy.js
+    telegram_api_base: str = os.getenv("TELEGRAM_API_BASE", "").rstrip("/")
     owner_id: int = int(os.getenv("OWNER_TELEGRAM_ID", "0") or 0)
 
     moodle_url: str = os.getenv("MOODLE_URL", "https://elearning.gtu.ge").rstrip("/")

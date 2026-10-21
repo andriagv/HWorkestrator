@@ -194,3 +194,11 @@ def test_english_and_georgian_task_labels_are_counted():
     assert pricing.n_tasks(text) == 4 and runners.expected_tasks(text) == [1, 2, 3, 4]
     cells = "# %% [markdown]\n# ## Task 1: a\n# %% [markdown]\n# ## Task 2: b\n"
     assert runners.missing_tasks(cells, text) == [3, 4]
+
+
+def test_telegram_api_base_is_used_when_set(monkeypatch):
+    from hworkestrator import bot, config
+    monkeypatch.setattr(bot, "settings", config.Settings(telegram_token="1:a", owner_id=1,
+                                                         telegram_api_base="https://tg.example.workers.dev"))
+    app = bot.build_app()
+    assert app.bot.base_url == "https://tg.example.workers.dev/bot1:a"
