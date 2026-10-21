@@ -40,6 +40,7 @@ class Settings:
     mode: str = os.getenv("BOT_MODE", "polling")          # polling | webhook
     webhook_url: str = os.getenv("WEBHOOK_URL", "")        # https://<host>
     port: int = int(os.getenv("PORT", "8080"))
+    health_port: int = int(os.getenv("HEALTH_PORT", "0") or 0)    # >0 -> serve a tiny "alive" page there
     workdir: str = os.getenv("WORKDIR", "/tmp/hworkestrator")
 
 

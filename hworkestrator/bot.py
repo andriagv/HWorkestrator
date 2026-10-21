@@ -235,6 +235,10 @@ def build_app():
 def main():
     logging.basicConfig(level=logging.INFO)
     app = build_app()
+    if settings.health_port:
+        from . import health
+        health.start(settings.health_port)
+        log.info("health endpoint on port %s", settings.health_port)
     if settings.mode == "webhook":
         app.run_webhook(listen="0.0.0.0", port=settings.port, url_path=settings.telegram_token,
                         webhook_url=f"{settings.webhook_url}/{settings.telegram_token}")
