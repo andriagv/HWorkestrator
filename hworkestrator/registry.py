@@ -19,6 +19,7 @@ SUBJECTS = {
     "infosec": {
         "title": "ინფორმაციული უსაფრთხოების საფუძვლები",
         "source": "drive",
+        "skills": ["secwork", "latexwork"],     # optional: which skills to offer (default: all)
     },
 }
 
@@ -26,4 +27,5 @@ SKILLS = {
     "cppwork": "💻 cppwork — ლექციის კოდები → Word",
     "latexwork": "📐 latexwork — ამოცანები → LaTeX + PDF",
     "jupiterwork": "📓 jupiterwork — დავალება → Jupyter notebook (.ipynb)",
+    "secwork": "🔐 secwork — ინფ. უსაფრთხოება: ამოცანები + Python კოდი → Word",
 }

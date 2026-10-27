@@ -15,7 +15,7 @@ MODELS = {
     "opus":   {"id": "claude-opus-5-5",   "name": "Opus 5.5",   "in": 4.0, "out": 20.0, "emoji": "🧠"},
     "fable":  {"id": "claude-fable-5-1",  "name": "Fable 5.1",  "in": 10.0, "out": 50.0, "emoji": "🏆"},
 }
-LLM_SKILLS = ("latexwork", "jupiterwork")           # cppwork never calls a model
+LLM_SKILLS = ("latexwork", "jupiterwork", "secwork")           # cppwork never calls a model
 
 
 def by_id(model_id):
@@ -96,6 +96,7 @@ def n_tasks(task_text):
 SIZE_TOKENS = {
     "latexwork":   {"S": 1500, "M": 3500, "L": 6000},
     "jupiterwork": {"S": 700,  "M": 1250, "L": 2000},        # code pass
+    "secwork":     {"S": 600,  "M": 1200, "L": 2200},        # statement + code pass (JSON)
 }
 EXPLAIN_TOKENS = {"S": 500, "M": 1000, "L": 1600}              # jupiterwork explanation pass
 
@@ -114,6 +115,11 @@ def estimate_tokens(skill, task_text, sizes=None):
         second_out = int((sum(EXPLAIN_TOKENS[z] for z in sizes) + 200) * 1.15)
         return [(task_in + 1400, first_out),                      # write the notebook (code)
                 (task_in + first_out + 500, second_out)]          # explanations from real outputs
+    if skill == "secwork":
+        first_out = int((sum(SIZE_TOKENS["secwork"][z] for z in sizes) + 300) * 1.15)
+        second_out = int((sum(EXPLAIN_TOKENS[z] for z in sizes) + 600) * 1.15)   # + conclusions
+        return [(task_in + 900, first_out),                       # tasks + code
+                (task_in + first_out + 600, second_out)]          # explanations from real outputs
     return []
 
 
