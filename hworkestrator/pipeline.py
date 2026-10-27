@@ -1,15 +1,16 @@
-"""overview(): look at a week. prepare(): run a skill on the chosen source file(s). submit(): upload."""
+"""list_items(): what can be done. overview(): look at one week (Moodle) or assignment file (Drive).
+prepare(): run a skill on the chosen source file(s). submit(): upload."""
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import pricing
 from .config import settings
-from .gdrive import Drive
+from .gdrive import Drive, downloadable
 from .moodle import Moodle, module_files
 from .registry import SUBJECTS
 from .runners import (extract_text, html_to_text, run_cppwork, run_jupiterwork,
-                      run_latexwork)
+                      run_latexwork, run_secwork)
 from .weeks import int_to_roman, numbers_in
 
 
@@ -27,10 +28,12 @@ class Overview:
     intro: str = ""                                   # assignment text written on the page
     targets: list = field(default_factory=list)       # upload places (one per assignment activity)
     has_content: bool = True                          # False -> "no assignment"
+    number: str = ""                                  # Drive: the assignment number from the file name
 
     @property
     def label(self):
-        return int_to_roman(self.week)
+        # Moodle weeks are roman ("VI კვირა"); Drive assignments keep their own number ("დავალება 3")
+        return self.number or int_to_roman(self.week)
 
 
 @dataclass
@@ -71,66 +74,79 @@ def new_workdir():
 
 # ---------------------------------------------------------------- looking at a week
 def list_weeks(subject_key):
-    """Week numbers that exist for the subject."""
-    subject = SUBJECTS[subject_key]
-    if subject["source"] == "moodle":
-        return _moodle().week_numbers(subject["match"])
-    drv = _drive()
-    return sorted({n for f in drv.children(settings.drive_root_folder_id)
-                   if "დავალება" in f["name"] for n in numbers_in(f["name"])[:1]})
+    """Week numbers that exist for a Moodle subject."""
+    return _moodle().week_numbers(SUBJECTS[subject_key]["match"])
 
 
-def overview(subject_key, week):
-    """Describe the week (lecture, text, attachments, what is already uploaded) without generating."""
-    subject = SUBJECTS[subject_key]
+def list_items(subject_key):
+    """[(button label, key)] to choose from: Moodle weeks, or the assignment files of the Drive folder
+    (newest first). The key goes into overview()."""
+    if SUBJECTS[subject_key]["source"] == "moodle":
+        return [(int_to_roman(w), str(w)) for w in list_weeks(subject_key)]
+    files = _drive().children(settings.drive_root_folder_id, order="createdTime desc")
+    return [(f["name"], f["id"]) for f in files if not f["mimeType"].endswith("folder") and downloadable(f)]
+
+
+def overview(subject_key, key):
+    """Describe the week / assignment (lecture, text, attachments, what is already uploaded) without generating."""
+    if SUBJECTS[subject_key]["source"] == "drive":
+        return _drive_overview(subject_key, key)
+    week = int(key)
     label = int_to_roman(week)
     work = new_workdir()
-    if subject["source"] == "moodle":
-        mdl = _moodle()
-        w = mdl.week(subject["match"], week)
-        files, lines, intros, targets = [], [], [], []
-        for m in w["resources"]:                          # every lecture/file/folder of the week
-            for url, fname in module_files(m):
-                files.append(mdl.download(url, work / str(m["id"]) / fname))
-                lines.append(f"📎 {m['name']}: {fname}")
-        for item in w["assigns"]:                         # every assignment activity of the week
-            m, a = item["module"], item["assignment"]
-            lines.append(f"📌 {m['name']}")
-            if not a:
-                continue
-            intro = html_to_text(a.get("intro", ""))
-            if intro:
-                lines.append("   📝 " + intro[:800])
-                intros.append(f"{m['name']}:\n{intro}")
-            for att in a.get("introattachments", []):
-                files.append(mdl.download(att["fileurl"], work / f"a{m['id']}" / att["filename"]))
-                lines.append(f"   📎 {att['filename']}")
-            ex = mdl.existing_files(a["id"])
-            lines.append("   📤 უკვე ატვირთულია: " + ", ".join(ex) if ex else "   📤 ჯერ არაფერია ატვირთული")
-            targets.append({"kind": "moodle", "assignment_id": a["id"], "label": m["name"], "existing": ex})
-        title = f"{w['course']['fullname']} — {w['section'].get('name', label)}"
-        intro_text = "\n\n".join(intros)
-        if not (files or intro_text):
-            msg = ("დავალების ადგილი არსებობს, მაგრამ მასალა (ლექცია/ტექსტი) ჯერ არ არის ატვირთული.\n"
-                   + "\n".join(l for l in lines if l.startswith("📌"))) if targets else "დავალება არ არის."
-            return Overview(subject_key, week, title, msg, has_content=False)
-        return Overview(subject_key, week, title, "\n".join(lines), files, intro_text, targets)
+    mdl = _moodle()
+    w = mdl.week(SUBJECTS[subject_key]["match"], week)
+    files, lines, intros, targets = [], [], [], []
+    for m in w["resources"]:                          # every lecture/file/folder of the week
+        for url, fname in module_files(m):
+            files.append(mdl.download(url, work / str(m["id"]) / fname))
+            lines.append(f"📎 {m['name']}: {fname}")
+    for item in w["assigns"]:                         # every assignment activity of the week
+        m, a = item["module"], item["assignment"]
+        lines.append(f"📌 {m['name']}")
+        if not a:
+            continue
+        intro = html_to_text(a.get("intro", ""))
+        if intro:
+            lines.append("   📝 " + intro[:800])
+            intros.append(f"{m['name']}:\n{intro}")
+        for att in a.get("introattachments", []):
+            files.append(mdl.download(att["fileurl"], work / f"a{m['id']}" / att["filename"]))
+            lines.append(f"   📎 {att['filename']}")
+        ex = mdl.existing_files(a["id"])
+        lines.append("   📤 უკვე ატვირთულია: " + ", ".join(ex) if ex else "   📤 ჯერ არაფერია ატვირთული")
+        targets.append({"kind": "moodle", "assignment_id": a["id"], "label": m["name"], "existing": ex})
+    title = f"{w['course']['fullname']} — {w['section'].get('name', label)}"
+    intro_text = "\n\n".join(intros)
+    if not (files or intro_text):
+        msg = ("დავალების ადგილი არსებობს, მაგრამ მასალა (ლექცია/ტექსტი) ჯერ არ არის ატვირთული.\n"
+               + "\n".join(l for l in lines if l.startswith("📌"))) if targets else "დავალება არ არის."
+        return Overview(subject_key, week, title, msg, has_content=False)
+    return Overview(subject_key, week, title, "\n".join(lines), files, intro_text, targets)
 
+
+def _drive_overview(subject_key, file_id):
+    """One assignment file of the Drive folder. Where to upload is chosen later (drive_folder())."""
     drv = _drive()
-    items = [f for f in drv.children(settings.drive_root_folder_id)
-             if "დავალება" in f["name"] and week in numbers_in(f["name"])]
-    if not items:
-        return Overview(subject_key, week, f"დავალება {label}", "დავალება არ არის.", has_content=False)
-    kids = drv.children(items[0]["id"])
-    student = [k for k in kids if k["name"].strip() == settings.drive_student_folder]
-    if not student:
-        raise PipelineError(f"'{items[0]['name']}'-ში საქაღალდე '{settings.drive_student_folder}' ვერ ვიპოვე")
-    src = [k for k in kids if k["id"] != student[0]["id"] and not k["mimeType"].endswith("folder")]
-    files = [drv.download(k, work / "src") for k in src]
-    lines = [f"📎 {f.name}" for f in files]
-    target = {"kind": "drive", "folder_id": student[0]["id"], "label": "Drive"}
-    return Overview(subject_key, week, items[0]["name"], "\n".join(lines) or "საქაღალდეში ფაილი არ არის.",
-                    files, "", [target], bool(files))
+    f = drv.get(file_id)
+    path = drv.download(f, new_workdir() / "src")
+    nums = numbers_in(Path(f["name"]).stem)
+    number = str(nums[0]) if nums else Path(f["name"]).stem
+    target = {"kind": "drive", "folder_id": None, "label": "Drive"}
+    return Overview(subject_key, nums[0] if nums else 0, f["name"], f"📎 {path.name}", [path], "", [target],
+                    number=number)
+
+
+def drive_folder(folder_id=None):
+    """A Drive folder for the upload picker: {"id", "name", "is_root", "folders": [(name, id)], "files": [names]}."""
+    drv = _drive()
+    root = settings.drive_root_folder_id
+    folder_id = folder_id or root
+    kids = drv.children(folder_id)
+    return {"id": folder_id, "is_root": folder_id == root,
+            "name": "" if folder_id == root else drv.get(folder_id)["name"],
+            "folders": sorted((k["name"], k["id"]) for k in kids if k["mimeType"].endswith("folder")),
+            "files": [k["name"] for k in kids if not k["mimeType"].endswith("folder")]}
 
 
 # ---------------------------------------------------------------- generating
@@ -195,6 +211,9 @@ def prepare(ov, skill, chosen=None, model=None):
     if skill == "jupiterwork":
         nb, extra, _ = run_jupiterwork(text, ov.label, work, course, model_id)
         return _job(ov, skill, nb, extra, info, usage)
+    if skill == "secwork":
+        docx, extra, _ = run_secwork(text, ov.label, work, course, model_id)
+        return _job(ov, skill, docx, extra, info, usage)
     raise PipelineError(f"უცნობი skill: {skill}")
 
 
@@ -205,6 +224,8 @@ def submit(job):
         _moodle().submit_file(t["assignment_id"], job.upload_file, finalize=settings.moodle_finalize)
         return "✅ ატვირთულია elearning-ზე" + (" და გაგზავნილია" if settings.moodle_finalize else " (შენახულია)")
     if t.get("kind") == "drive":
+        if not t.get("folder_id"):
+            raise PipelineError("აირჩიე Drive-ის საქაღალდე")
         _drive().upload(t["folder_id"], job.upload_file, job.upload_file.name)
-        return f"✅ ატვირთულია Drive-ზე ({settings.drive_student_folder})"
+        return f"✅ ატვირთულია Drive-ზე: {t.get('label', '')}/{job.upload_file.name}"
     raise PipelineError("ატვირთვის ადგილი ვერ ვიპოვე (ამ კვირაში დავალების მოდული არ არის)")

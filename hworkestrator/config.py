@@ -32,9 +32,8 @@ class Settings:
     google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
     google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
     google_refresh_token: str = os.getenv("GOOGLE_REFRESH_TOKEN", "")
+    # the course folder: assignment files are in it, the upload folders (made by the lecturer) are its subfolders
     drive_root_folder_id: str = os.getenv("DRIVE_ROOT_FOLDER_ID", "")
-    # name of your subfolder inside each "დავალება N" folder; usually equals the group number
-    drive_student_folder: str = os.getenv("DRIVE_STUDENT_FOLDER") or os.getenv("STUDENT_GROUP", "")
 
     # personal data lives only in .env (never in the code / git)
     student_name: str = os.getenv("STUDENT_NAME", "")

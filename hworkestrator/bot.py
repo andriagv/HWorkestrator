@@ -8,7 +8,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from . import pipeline, pricing
 from .config import settings
 from .registry import SKILLS, SUBJECTS
-from .weeks import int_to_roman
+from .weeks import int_to_roman, numbers_in
 
 log = logging.getLogger("hworkestrator")
 
@@ -40,18 +40,21 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_weeks(msg, subject_key):
-    """Edit `msg` into the week picker for the subject."""
+    """Edit `msg` into the week picker (Moodle) or the assignment-file picker (Drive) for the subject."""
     title = SUBJECTS[subject_key]["title"]
+    drive = SUBJECTS[subject_key]["source"] == "drive"
     try:
-        weeks = await asyncio.to_thread(pipeline.list_weeks, subject_key)
+        items = await asyncio.to_thread(pipeline.list_items, subject_key)
     except Exception as e:
-        log.exception("list_weeks failed")
+        log.exception("list_items failed")
         return await msg.edit_text(f"❌ {e}\n\n/start")
-    if not weeks:
-        return await msg.edit_text(f"{title}\nკვირები ვერ ვიპოვე.\n\n/start")
-    buttons = [(int_to_roman(w), f"wk:{w}") for w in weeks]
-    markup = grid(buttons + [("⬅️ საგნები", "home")], per_row=4)
-    await msg.edit_text(f"{title}\nაირჩიე კვირა:", reply_markup=markup)
+    if not items:
+        return await msg.edit_text(f"{title}\n{'Drive-ის საქაღალდეში ფაილი' if drive else 'კვირები'} ვერ ვიპოვე.\n\n/start")
+    buttons = [(("📄 " + label[:50]) if drive else label, f"wk:{key}") for label, key in items[:30]]
+    buttons.append(("⬅️ საგნები", "home"))
+    if drive:
+        return await msg.edit_text(f"{title}\nაირჩიე დავალება:", reply_markup=kb(buttons))
+    await msg.edit_text(f"{title}\nაირჩიე კვირა:", reply_markup=grid(buttons, per_row=4))
 
 
 @owner_only
@@ -73,7 +76,8 @@ async def on_home(update: Update, ctx):
 
 
 def skill_rows(subject):
-    rows = [(label, f"skill:{k}") for k, label in SKILLS.items()]
+    allowed = SUBJECTS[subject].get("skills") or list(SKILLS)
+    rows = [(label, f"skill:{k}") for k, label in SKILLS.items() if k in allowed]
     rows.append(("⬅️ კვირები", f"subj:{subject}"))
     return rows
 
@@ -85,11 +89,12 @@ async def on_week(update: Update, ctx):
     subject = ctx.user_data.get("subject")
     if not subject:
         return await q.edit_message_text("დაწერე /start")
-    week = int(q.data.split(":", 1)[1])
-    ctx.user_data["week"] = week
-    await q.edit_message_text(f"⏳ ვამოწმებ {int_to_roman(week)} კვირას…")
+    key = q.data.split(":", 1)[1]                       # week number (Moodle) or file id (Drive)
+    ctx.user_data["week"] = key
+    await q.edit_message_text("⏳ ვამოწმებ…" if SUBJECTS[subject]["source"] == "drive"
+                              else f"⏳ ვამოწმებ {int_to_roman(int(key))} კვირას…")
     try:
-        ov = await asyncio.to_thread(pipeline.overview, subject, week)
+        ov = await asyncio.to_thread(pipeline.overview, subject, key)
     except Exception as e:
         log.exception("overview failed")
         return await q.edit_message_text(f"❌ {e}\n\n/start")
@@ -179,6 +184,8 @@ async def generate(q, ctx, skill, model=None):
         with open(f, "rb") as fh:
             await q.message.reply_document(fh, filename=f.name)
     targets = job.targets
+    if targets and targets[0].get("kind") == "drive":    # the lecturer's folders: browse and pick one
+        return await show_folder(q.message, ctx, None, new=True)
     if not targets:
         return await q.message.reply_text("⚠️ ამ კვირაში დავალების ადგილი (assignment) არ არის — ატვირთვა შეუძლებელია.\n/start")
     lines = []
@@ -192,6 +199,61 @@ async def generate(q, ctx, skill, model=None):
         rows = [(f"✅ {t.get('label', i)}", f"ok:{i}") for i, t in enumerate(targets)] + [("❌ გაუქმება", "no")]
         text = "რომელ დავალებაში ავტვირთო?\n" + "\n".join(lines)
     await q.message.reply_text(text, reply_markup=kb(rows))
+
+
+async def show_folder(msg, ctx, folder_id, new=False):
+    """Drive upload picker: subfolders of `folder_id` (default: the course folder) + "upload here"."""
+    job = ctx.user_data.get("job")
+    try:
+        d = await asyncio.to_thread(pipeline.drive_folder, folder_id)
+    except Exception as e:
+        log.exception("drive_folder failed")
+        return await (msg.reply_text if new else msg.edit_text)(f"❌ {e}\n/start")
+    ctx.user_data["folders"] = {i: name for name, i in d["folders"]} | {d["id"]: d["name"]}
+    # ⭐ first: the folder of this assignment ("4 დავ." for assignment 4) and your group's folder
+    hits = [f for f in d["folders"] if job.label in map(str, numbers_in(f[0])) or f[0].strip() == settings.student_group]
+    rows = [(("⭐ " if f in hits else "📁 ") + f[0][:50], f"dir:{f[1]}") for f in hits + [f for f in d["folders"] if f not in hits]]
+    lines = [f"რომელ საქაღალდეში ავტვირთო „{job.upload_file.name}“?"]
+    if not d["is_root"]:
+        same = job.upload_file.name in d["files"]
+        lines.append(f"\n📂 {d['name']}: " + (", ".join(d["files"][:15]) if d["files"] else "ცარიელია"))
+        if same:
+            lines.append("⚠️ ამავე სახელის ფაილი უკვე არის — ჩაანაცვლებს (ახალი ვერსია).")
+        rows.insert(0, (f"✅ ატვირთე აქ: {d['name'][:40]}", f"put:{d['id']}"))
+        rows.append(("⬅️ თავიდან", "dir:root"))
+    elif not d["folders"]:
+        lines.append("\nსაქაღალდეში ქვესაქაღალდე არ არის — ლექტორს ჯერ არ შეუქმნია.")
+    rows.append(("❌ გაუქმება", "no"))
+    await (msg.reply_text if new else msg.edit_text)("\n".join(lines), reply_markup=kb(rows))
+
+
+@owner_only
+async def on_dir(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
+    if not ctx.user_data.get("job"):
+        return await q.edit_message_text("დაწერე /start")
+    fid = q.data.split(":", 1)[1]
+    await show_folder(q.message, ctx, None if fid == "root" else fid)
+
+
+@owner_only
+async def on_put(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
+    job = ctx.user_data.get("job")
+    if not job:
+        return await q.edit_message_text("დაწერე /start")
+    fid = q.data.split(":", 1)[1]
+    job.target = {"kind": "drive", "folder_id": fid, "label": ctx.user_data.get("folders", {}).get(fid, "Drive")}
+    await q.edit_message_text("⏳ ვტვირთავ…")
+    try:
+        result = await asyncio.to_thread(pipeline.submit, job)
+    except Exception as e:
+        log.exception("submit failed")
+        return await q.edit_message_text(f"❌ ატვირთვა ვერ მოხერხდა: {e}")
+    ctx.user_data.clear()
+    await q.edit_message_text(result + "\n\n/start")
 
 
 @owner_only
@@ -228,11 +290,13 @@ def build_app():
     app.add_handler(CommandHandler(["start", "new"], start, filters=owner))
     app.add_handler(CallbackQueryHandler(on_subject, pattern=r"^subj:"))
     app.add_handler(CallbackQueryHandler(on_home, pattern=r"^home$"))
-    app.add_handler(CallbackQueryHandler(on_week, pattern=r"^wk:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_week, pattern=r"^wk:[\w-]+$"))
     app.add_handler(CallbackQueryHandler(on_source, pattern=r"^src:(\d+|all)$"))
     app.add_handler(CallbackQueryHandler(on_skill, pattern=r"^skill:"))
     app.add_handler(CallbackQueryHandler(on_model, pattern=r"^mdl:\w+$"))
     app.add_handler(CallbackQueryHandler(on_decision, pattern=r"^(ok:\d+|no)$"))
+    app.add_handler(CallbackQueryHandler(on_dir, pattern=r"^dir:[\w-]+$"))
+    app.add_handler(CallbackQueryHandler(on_put, pattern=r"^put:[\w-]+$"))
     return app
 
 
