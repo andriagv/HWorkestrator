@@ -6,3 +6,4 @@ __pycache__/
 *.aux
 *.log
 .DS_Store
+client_secret*.json
