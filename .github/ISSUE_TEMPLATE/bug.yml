@@ -1,0 +1,28 @@
+name: 🐛 Bug
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead? Screenshots of the bot help.
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: Which source / skill / step (e.g. "Drive source, secwork, upload")?
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `python scripts/doctor.py`
+      description: Remove anything private before pasting (it never prints secrets, but check names and ids).
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Error / log
+      description: The error message from the chat or the terminal (remove tokens!).
+      render: text

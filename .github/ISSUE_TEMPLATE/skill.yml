@@ -1,0 +1,25 @@
+name: 🧩 New skill for a kind of homework
+description: Suggest (or offer to build) a skill for a subject the existing skills don't cover
+labels: [skill]
+body:
+  - type: input
+    id: subject
+    attributes:
+      label: Subject / kind of homework
+      description: e.g. "SQL queries with screenshots", "essay in APA style", "MATLAB lab report"
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Example assignment and expected result
+      description: What a task looks like and what the finished file must contain (file type, sections, code, plots…). Attach anonymised examples. No names or group numbers.
+    validations:
+      required: true
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help?
+      options:
+        - label: I can share more anonymised examples
+        - label: I'd like to build the skill myself (see CONTRIBUTING.md)

@@ -1,0 +1,31 @@
+name: 🏫 Support my university / platform
+description: Ask for (or offer to build) support for your university's LMS or folder layout
+labels: [source]
+body:
+  - type: input
+    id: university
+    attributes:
+      label: University
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Moodle, Canvas, Google Classroom, Blackboard, Google Drive, Microsoft Teams / OneDrive, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How assignments are posted and submitted
+      description: Where do lecturers post tasks, where do you upload solutions, how are files named? Do you know if the platform has an API / tokens?
+    validations:
+      required: true
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help?
+      options:
+        - label: I can test it with my account
+        - label: I'd like to write the adapter myself (see CONTRIBUTING.md)
