@@ -1,4 +1,11 @@
-"""What the bot can do. To add a subject or a skill, add an entry here."""
+"""What the bot offers — the file to edit when adapting the bot to a student.
+
+SUBJECTS: key -> {"title": shown in the bot and used as the course name in the document header,
+                  "source": where its assignments come from / go to — a name in sources.SOURCES,
+                  "match": (moodle) substring of the Moodle course name,
+                  "skills": (optional) which skills to offer for it; default all}
+SKILLS:   skill folder in hworkestrator/skills/ -> button label
+"""
 
 SUBJECTS = {
     "dsa": {

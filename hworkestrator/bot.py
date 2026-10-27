@@ -1,4 +1,5 @@
-"""Telegram bot: subject -> skill -> week -> (generate) -> preview -> ✅ upload."""
+"""Telegram bot — the only user interface: subject -> week / assignment file -> skill -> model + price ->
+(generate) -> preview -> ✅ upload. All work is done by pipeline.py; this file only talks to the user."""
 import asyncio
 import logging
 
@@ -8,7 +9,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from . import pipeline, pricing
 from .config import settings
 from .registry import SKILLS, SUBJECTS
-from .weeks import int_to_roman, numbers_in
+from .sources.weeks import int_to_roman, numbers_in
 
 log = logging.getLogger("hworkestrator")
 
@@ -139,7 +140,7 @@ async def on_skill(update: Update, ctx):
         return await q.edit_message_text("დაწერე /start")
     skill = q.data.split(":", 1)[1]
     ctx.user_data["skill"] = skill
-    if skill not in pricing.LLM_SKILLS:                 # cppwork: no model, no cost
+    if not pricing.uses_llm(skill):                     # e.g. cppwork: no model, no cost
         return await generate(q, ctx, skill)
     await q.edit_message_text("⏳ ფასს ვითვლი (Haiku 5.5)…")
     try:

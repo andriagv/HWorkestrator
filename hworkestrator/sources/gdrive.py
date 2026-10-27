@@ -1,9 +1,18 @@
-"""Minimal Google Drive client (REST, user OAuth refresh token — service accounts cannot
-upload into a personal My Drive, so we act as the user)."""
+"""Google Drive source: a minimal REST client (user OAuth refresh token — service accounts cannot upload into a
+personal My Drive, so we act as the user) and the source functions list_items / overview / submit, plus folder()
+for the upload-folder picker.
+
+Expected layout: the course folder (DRIVE_ROOT_FOLDER_ID) holds the assignment FILES ("დავალება 3.pdf") and the
+lecturer's upload folders ("4 დავ. მიმდინარე" → "<group>"); the user picks the upload folder in the chat."""
+import json
 import mimetypes
 from pathlib import Path
 
 import requests
+
+from ..config import settings
+from ..models import Overview, PipelineError
+from .weeks import numbers_in
 
 API = "https://www.googleapis.com/drive/v3"
 UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
@@ -87,7 +96,7 @@ class Drive:
         same = [f for f in self.children(folder_id) if f["name"] == name and not f["mimeType"].startswith(
             "application/vnd.google-apps.")]
         meta = {"name": name} if same else {"name": name, "parents": [folder_id]}
-        files = {"metadata": ("metadata", __import__("json").dumps(meta), "application/json; charset=UTF-8"),
+        files = {"metadata": ("metadata", json.dumps(meta), "application/json; charset=UTF-8"),
                  "file": (name, path.read_bytes(), mime)}
         params = {"uploadType": "multipart", "supportsAllDrives": "true"}
         if same:
@@ -98,3 +107,46 @@ class Drive:
         if r.status_code != 200:
             raise DriveError(f"upload failed: {r.status_code} {r.text[:200]}")
         return r.json()["id"]
+
+
+# ---------------------------------------------------------------- source functions
+def client():
+    if not (settings.google_client_id and settings.google_refresh_token and settings.drive_root_folder_id):
+        raise PipelineError("Google Drive წვდომა არ არის მორგებული (GOOGLE_* ცვლადები)")
+    return Drive(settings.google_client_id, settings.google_client_secret, settings.google_refresh_token)
+
+
+def list_items(subject_key):
+    """The assignment files of the course folder, newest first."""
+    files = client().children(settings.drive_root_folder_id, order="createdTime desc")
+    return [(f["name"], f["id"]) for f in files if not f["mimeType"].endswith("folder") and downloadable(f)]
+
+
+def overview(subject_key, file_id, work):
+    """One assignment file; its number comes from the file name. The upload folder is picked later (folder())."""
+    drv = client()
+    f = drv.get(file_id)
+    path = drv.download(f, Path(work) / "src")
+    nums = numbers_in(Path(f["name"]).stem)
+    target = {"kind": "drive", "folder_id": None, "label": "Drive"}
+    return Overview(subject_key, nums[0] if nums else 0, f["name"], f"📎 {path.name}", [path], "", [target],
+                    number=str(nums[0]) if nums else Path(f["name"]).stem)
+
+
+def folder(folder_id=None):
+    """A folder for the upload picker: {"id", "name", "is_root", "folders": [(name, id)], "files": [names]}."""
+    drv = client()
+    root = settings.drive_root_folder_id
+    folder_id = folder_id or root
+    kids = drv.children(folder_id)
+    return {"id": folder_id, "is_root": folder_id == root,
+            "name": "" if folder_id == root else drv.get(folder_id)["name"],
+            "folders": sorted((k["name"], k["id"]) for k in kids if k["mimeType"].endswith("folder")),
+            "files": [k["name"] for k in kids if not k["mimeType"].endswith("folder")]}
+
+
+def submit(target, path):
+    if not target.get("folder_id"):
+        raise PipelineError("აირჩიე Drive-ის საქაღალდე")
+    client().upload(target["folder_id"], path, Path(path).name)
+    return f"✅ ატვირთულია Drive-ზე: {target.get('label', '')}/{Path(path).name}"

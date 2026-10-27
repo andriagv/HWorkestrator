@@ -1,11 +1,15 @@
-"""Moodle (elearning.gtu.ge) web-service client — token based, no browser."""
-import re
+"""Moodle source (any Moodle site, e.g. elearning.gtu.ge): the web-service client — token based, no browser —
+and the source functions list_items / overview / submit (see sources/__init__.py)."""
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import requests
 
-from .weeks import find_week_section, week_sections
+from ..config import settings
+from ..documents import html_to_text
+from ..models import Overview, PipelineError
+from ..registry import SUBJECTS
+from .weeks import find_week_section, int_to_roman, week_sections
 
 
 class MoodleError(RuntimeError):
@@ -123,3 +127,54 @@ def module_files(module):
     """[(fileurl, filename)] of a file/folder activity."""
     return [(c["fileurl"], c["filename"]) for c in (module or {}).get("contents", [])
             if c.get("type") == "file"]
+
+
+# ---------------------------------------------------------------- source functions
+def client():
+    if not settings.moodle_token:
+        raise PipelineError("MOODLE_TOKEN არ არის მითითებული")
+    return Moodle(settings.moodle_url, settings.moodle_token)
+
+
+def list_items(subject_key):
+    """The course's weeks, as roman-numbered buttons."""
+    return [(int_to_roman(w), str(w)) for w in client().week_numbers(SUBJECTS[subject_key]["match"])]
+
+
+def overview(subject_key, key, work):
+    """Every lecture/file and every assignment activity of the week; each activity is an upload target."""
+    week = int(key)
+    mdl = client()
+    w = mdl.week(SUBJECTS[subject_key]["match"], week)
+    files, lines, intros, targets = [], [], [], []
+    for m in w["resources"]:                          # every lecture/file/folder of the week
+        for url, fname in module_files(m):
+            files.append(mdl.download(url, Path(work) / str(m["id"]) / fname))
+            lines.append(f"📎 {m['name']}: {fname}")
+    for item in w["assigns"]:                         # every assignment activity of the week
+        m, a = item["module"], item["assignment"]
+        lines.append(f"📌 {m['name']}")
+        if not a:
+            continue
+        intro = html_to_text(a.get("intro", ""))
+        if intro:
+            lines.append("   📝 " + intro[:800])
+            intros.append(f"{m['name']}:\n{intro}")
+        for att in a.get("introattachments", []):
+            files.append(mdl.download(att["fileurl"], Path(work) / f"a{m['id']}" / att["filename"]))
+            lines.append(f"   📎 {att['filename']}")
+        ex = mdl.existing_files(a["id"])
+        lines.append("   📤 უკვე ატვირთულია: " + ", ".join(ex) if ex else "   📤 ჯერ არაფერია ატვირთული")
+        targets.append({"kind": "moodle", "assignment_id": a["id"], "label": m["name"], "existing": ex})
+    title = f"{w['course']['fullname']} — {w['section'].get('name', int_to_roman(week))}"
+    intro_text = "\n\n".join(intros)
+    if not (files or intro_text):
+        msg = ("დავალების ადგილი არსებობს, მაგრამ მასალა (ლექცია/ტექსტი) ჯერ არ არის ატვირთული.\n"
+               + "\n".join(l for l in lines if l.startswith("📌"))) if targets else "დავალება არ არის."
+        return Overview(subject_key, week, title, msg, has_content=False)
+    return Overview(subject_key, week, title, "\n".join(lines), files, intro_text, targets)
+
+
+def submit(target, path):
+    client().submit_file(target["assignment_id"], path, finalize=settings.moodle_finalize)
+    return "✅ ატვირთულია elearning-ზე" + (" და გაგზავნილია" if settings.moodle_finalize else " (შენახულია)")
