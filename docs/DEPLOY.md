@@ -20,8 +20,7 @@ The bot is one Docker image (`Dockerfile`). Two free options:
    (needed for the uptime pings; code is public on GitHub anyway, secrets stay hidden).
 2. Space → **Settings → Variables and secrets** → add as **Secrets**: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`,
    `MOODLE_TOKEN`, `ANTHROPIC_API_KEY`, `STUDENT_NAME`, `STUDENT_GROUP`, `DRIVE_ROOT_FOLDER_ID`,
-   `DRIVE_STUDENT_FOLDER`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
-   (the last four only if you use Drive). Add as plain variable: `BOT_MODE=polling`.
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` (the last four only if you use Drive). Add as plain variable: `BOT_MODE=polling`.
 3. Push the code (HF asks for your username + an access token with *write* permission as password):
    ```bash
    bash deploy/push_to_space.sh <hf-user>/<space-name>
