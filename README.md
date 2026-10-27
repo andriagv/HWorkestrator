@@ -1,5 +1,11 @@
 # HWorkestrator
 
+[![tests](https://github.com/andriagv/HWorkestrator/actions/workflows/tests.yml/badge.svg)](https://github.com/andriagv/HWorkestrator/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![Telegram bot](https://img.shields.io/badge/Telegram-bot-26A5E4?logo=telegram&logoColor=white)
+![Claude](https://img.shields.io/badge/AI-Claude-D97757)
+
 A Telegram bot that does your university homework, with you approving every step.
 
 ```
@@ -56,3 +62,6 @@ GTU students can use it almost as is.
 - [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md): the full setup reference (what the skill follows).
 - [docs/DEPLOY.md](docs/DEPLOY.md): run the bot in the cloud so your computer can be off.
 - `python -m pytest -q` runs the tests (fakes only, no real accounts).
+
+## License
+[MIT](LICENSE): free to use, change and share. Use it responsibly and follow your university's rules on AI help.
