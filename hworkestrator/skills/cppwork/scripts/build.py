@@ -99,9 +99,11 @@ def is_slides(path):
     return os.path.splitext(path)[1].lower() == ".pptx"
 
 
-def clean_slide_line(line):
+def clean_slide_line(line, verbatim=False):
     """Drop slide-annotation artifacts: unbalanced /* or */ and stray Georgian labels after code."""
     line = line.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+    if verbatim:                                   # PDF/Word: copy the code exactly as written
+        return line.rstrip()
     if "/*" in line and "*/" not in line:
         line = line[:line.index("/*")]
     elif "*/" in line and "/*" not in line:
@@ -130,7 +132,7 @@ def _collect_from(lines, i0, labelled, keep_blank=False):
                 continue
         if STOP_RE.match(line) or CODE_LABEL_RE.match(line):
             break
-        line = clean_slide_line(line)
+        line = clean_slide_line(line, keep_blank)
         if not line.strip() or re.fullmatch(r"\s*\d{1,3}\s*", line):
             if keep_blank and code and code[-1] != "" and not line.strip():
                 code.append("")                     # one blank line between members (PDF/Word)
@@ -238,7 +240,7 @@ def extract(path, merged=True):
                 cur = None if cur["code"] else cur
                 in_code = False
                 continue
-            line = clean_slide_line(line)
+            line = clean_slide_line(line, wrapped)
             if not line.strip() or re.fullmatch(r"\s*\d{1,3}\s*", line):
                 if wrapped and not line.strip() and cur["code"] and cur["code"][-1] != "":
                     cur["code"].append("")
@@ -333,7 +335,7 @@ def tidy(lines, verbatim=False):
     if verbatim and any(re.match(r"\s+\S", l) for l in lines):
         keep = [l for i, l in enumerate(lines)
                 if l.strip() or not (i + 1 < len(lines) and lines[i + 1].lstrip().startswith("}"))]
-        return [fix_typos(l).rstrip() for l in keep]
+        return [l.rstrip() for l in keep]
     flat = []
     for line in lines:
         code, comment = split_comment(line)
@@ -370,15 +372,16 @@ def tidy(lines, verbatim=False):
     return out
 
 
-def syntax_check(lines, label):
+def syntax_check(lines, label, quiet=False):
     with tempfile.TemporaryDirectory() as d:
         f = os.path.join(d, "t.cpp")
         open(f, "w").write("\n".join(lines) + "\n")
         r = subprocess.run(["g++", "-fsyntax-only", f], capture_output=True, text=True)
     ok = r.returncode == 0
-    print(f"  {label}: {'compiles OK' if ok else 'COMPILE ERROR'}")
-    if not ok:
-        print(r.stderr[:600])
+    if not quiet:
+        print(f"  {label}: {'compiles OK' if ok else 'COMPILE ERROR'}")
+        if not ok:
+            print(r.stderr[:600])
     return ok
 
 
@@ -496,7 +499,13 @@ def main():
         print(f"No 'საილუსტრაციო მაგალითი' labels — using {len(examples)} code block(s) found in the slides")
     bad = 0
     for e in examples:
-        e["code"] = tidy(e["code"], verbatim=not is_slides(a.pptx))
+        exact = not is_slides(a.pptx)
+        e["code"] = tidy(e["code"], verbatim=exact)
+        if exact and not syntax_check(e["code"], "", quiet=True):
+            fixed = [fix_typos(l) for l in e["code"]]
+            if fixed != e["code"] and syntax_check(fixed, "", quiet=True):
+                print(f"  მაგალითი {e['n']}: დაუკომპილირებელი იყო, ცნობილი შეცდომა გავასწორე (მაგ. main-ის ტიპი)")
+                e["code"] = fixed
         bad += not syntax_check(e["code"], f"მაგალითი {e['n']}")
     if not a.no_shots:
         from PIL import Image
