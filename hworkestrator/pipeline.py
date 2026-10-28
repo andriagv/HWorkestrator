@@ -75,10 +75,13 @@ def prepare(ov, skill, chosen=None, model=None):
         raise PipelineError(f"უცნობი skill: {skill}") from None
     usage = pricing.start_tracking()
     chosen = list(ov.files if chosen is None else chosen)
-    if runner.NEEDS == "pptx":
-        source = next((f for f in chosen if Path(f).suffix.lower() == ".pptx"), None)
-        if source is None:
-            raise PipelineError(f"{skill}-ს სჭირდება ლექციის .pptx ფაილი — აირჩიე ის")
+    if runner.NEEDS == "lecture":
+        types = runner.LECTURE_TYPES
+        found = sorted((f for f in chosen if Path(f).suffix.lower() in types),
+                       key=lambda f: types.index(Path(f).suffix.lower()))
+        if not found:
+            raise PipelineError(f"{skill}-ს სჭირდება ლექციის ფაილი ({', '.join(types)}) — აირჩიე ის")
+        source = found[0]
     else:
         source = _task_text(ov, chosen)
         if len(source.strip()) < 20:

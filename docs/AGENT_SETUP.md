@@ -102,7 +102,7 @@ A skill turns an assignment into the finished file. The existing ones are templa
 
 | skill | input → output | pattern worth copying |
 |---|---|---|
-| `cppwork` | lecture .pptx → Word with C++ examples + screenshots | no LLM; extract → compile → render |
+| `cppwork` | lecture .pptx / .pdf / .docx → Word with C++ examples + screenshots | no LLM; extract → compile → render |
 | `latexwork` | math/theory → LaTeX → PDF | Claude writes a body, a fixed preamble owns the layout |
 | `jupiterwork` | data-science tasks → executed .ipynb | write code → **run it** → repair → explain from real outputs |
 | `secwork` | security tasks → PDF + docx with code/output | JSON solution → run code → analysis from real output → PDF |

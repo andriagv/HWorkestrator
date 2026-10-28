@@ -5,7 +5,8 @@
     <skill>/assets/     templates and logos
 
 Every runner.py provides:
-    NEEDS = "text" | "pptx"     what run() gets: the assignment text, or the lecture .pptx file
+    NEEDS = "text" | "lecture"  what run() gets: the assignment text, or a lecture file
+                                (then also LECTURE_TYPES = (".pptx", ".pdf", ".docx"), preferred first)
     USES_LLM = True | False     False -> no model choice and no cost
     run(source, label, outdir, course, model=None) -> (upload_file, extra_files, log)
         label  = assignment/week number for the header and file name; course = subject title
