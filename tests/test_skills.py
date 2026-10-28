@@ -193,3 +193,31 @@ def test_cppwork_reads_pdf_pages_and_drops_page_numbers(monkeypatch, tmp_path):
     ex = b.extract(str(pdf))
     assert len(ex) == 1 and ex[0]["n"] == 3
     assert ex[0]["code"] == ["#include <iostream>", "int main()", "{", "return 0;", "}"]   # lone "3" dropped
+
+
+def test_cppwork_pdf_code_continues_over_a_page_break_and_keeps_its_layout(monkeypatch, tmp_path):
+    b = _cppwork()
+    import pypdf
+
+    head = "ლექცია 6 | ალგორითმები"                       # running header on every page
+    page1 = (head + "\n1\nSLL-ის სრული C++ კოდი\n#include <iostream>\nusing namespace std;\n\n"
+             "struct Node {\n    int data;\n    Node(int v) : data(v) {}")
+    page2 = (head + "\n2\n\n};\n\nint main() {\n    Node n(1);\n    cout << n.data << endl;\n"
+             "    return 0;\n}\n\nდასკვნითი რეკომენდაციები")
+
+    class FakePage:
+        def __init__(self, t): self.t = t
+        def extract_text(self): return self.t
+
+    class FakeReader:
+        def __init__(self, path): self.pages = [FakePage(page1), FakePage(page2)]
+
+    monkeypatch.setattr(pypdf, "PdfReader", FakeReader)
+    pdf = tmp_path / "lec.pdf"
+    pdf.write_bytes(b"%PDF")
+    ex = b.extract(str(pdf)) or b.extract_unmarked(str(pdf))
+    assert len(ex) == 1 and ex[0]["cond"].startswith("SLL-ის სრული C++ კოდი")
+    code = b.tidy(ex[0]["code"], verbatim=True)
+    assert head not in "\n".join(code)                      # running header removed
+    assert "    int data;" in code and code[-1] == "}"       # own indentation kept, block spans the page break
+    assert code[code.index("};") - 1] != ""                  # no blank line right before a closing brace
