@@ -6,10 +6,10 @@ slides, tidies the code, syntax-checks it with g++, and fills the Word
 template (header untouched except week number and today's date; output
 boxes left empty).
 
-usage: build.py LECTURE.pptx --week "V" [--out OUT.docx] [--date DD.MM.YYYY]
+usage: build.py LECTURE(.pptx|.pdf|.docx) --week "V" [--out OUT.docx] [--date DD.MM.YYYY]
        [--student NAME --group GROUP --course COURSE]   (or env STUDENT_NAME / STUDENT_GROUP / COURSE_NAME)
 """
-import argparse, datetime, html, os, re, shutil, subprocess, sys, tempfile, zipfile
+import argparse, datetime, html, json, os, re, shutil, subprocess, sys, tempfile, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -35,8 +35,56 @@ def slide_paragraphs(z):
 
 
 
+# ---------- other sources: PDF and Word lectures ----------
+def pdf_pages(path):
+    """One list of lines per PDF page (pypdf, falling back to pdftotext). Bare page numbers are dropped."""
+    pages = []
+    try:
+        from pypdf import PdfReader
+        pages = [(pg.extract_text() or "") for pg in PdfReader(path).pages]
+    except Exception:
+        pass
+    if not any(t.strip() for t in pages):
+        try:
+            out = subprocess.run(["pdftotext", "-layout", path, "-"], capture_output=True, text=True).stdout
+            pages = out.split("\f")
+        except OSError:
+            pages = []
+    for t in pages:
+        lines = [l.replace("\xa0", " ").rstrip() for l in t.split("\n")]
+        yield [l for l in lines if not re.fullmatch(r"\s*\d{1,3}\s*", l)]
+
+
+def docx_pages(path):
+    """A Word lecture as one 'page' of paragraphs (line breaks inside a paragraph become lines)."""
+    z = zipfile.ZipFile(path)
+    x = z.read("word/document.xml").decode("utf8")
+    lines = []
+    for p in re.findall(r"<w:p[ >].*?</w:p>", x, flags=re.S):
+        p = re.sub(r"<w:br[^>]*/>|<w:tab/>", "\n", p)
+        t = html.unescape("".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>|(\n)", p) and
+                                  [a or b for a, b in re.findall(r"<w:t[^>]*>([^<]*)</w:t>|(\n)", p)]))
+        lines.extend(t.replace("\xa0", " ").split("\n"))
+    yield lines
+
+
+def pages(path):
+    """Lecture file -> iterator of pages (a page = list of text lines): pptx slides, PDF pages, or a docx."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return pdf_pages(path)
+    if ext == ".docx":
+        return docx_pages(path)
+    return slide_paragraphs(zipfile.ZipFile(path))
+
+
+def is_slides(path):
+    return os.path.splitext(path)[1].lower() == ".pptx"
+
+
 def clean_slide_line(line):
     """Drop slide-annotation artifacts: unbalanced /* or */ and stray Georgian labels after code."""
+    line = line.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
     if "/*" in line and "*/" not in line:
         line = line[:line.index("/*")]
     elif "*/" in line and "/*" not in line:
@@ -52,22 +100,21 @@ CODE_LABEL_RE = re.compile(r"^\s*კოდი\s*-?\s*code\b", re.I)
 CODEY_RE = re.compile(r"[;{}]\s*(//.*)?$|^\s*#\s*include|^\s*(int|float|double|char|string|void|struct|using|for|while|if|return)\b")
 
 
-def collect_code(lines, labelled=False):
-    """Code from a slide's text lines.
-    Normal slide: from the first #include until main() is closed (must contain main, so that
-    "#include <stack>" in explanatory prose is ignored).
-    Slide carrying the "კოდი code" label: the whole code listing, even without main."""
-    code, depth, started = [], 0, False
-    for line in lines:
+def _collect_from(lines, i0, labelled):
+    """One code block starting at/after lines[i0] -> (code_lines, index_after_block, start_index)."""
+    code, depth, started, i, start = [], 0, False, i0, i0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
         if not started:
             if re.match(r"\s*#\s*include", line) or (labelled and CODEY_RE.search(line)):
-                started = True
+                started, start = True, i - 1
             else:
                 continue
         if STOP_RE.match(line) or CODE_LABEL_RE.match(line):
             break
         line = clean_slide_line(line)
-        if not line.strip():
+        if not line.strip() or re.fullmatch(r"\s*\d{1,3}\s*", line):
             continue
         code.append(line)
         code_only = split_comment(line)[0]
@@ -78,33 +125,77 @@ def collect_code(lines, labelled=False):
         # drop trailing non-code lines (printed output etc.)
         while code and not CODEY_RE.search(code[-1]):
             code.pop()
-        return code
-    return code if re.search(r"\bmain\b", " ".join(code)) else []
+        return code, i, start
+    return (code if re.search(r"\bmain\b", " ".join(code)) else []), i, start
 
 
-def extract_unmarked(pptx):
-    """Lectures without 'საილუსტრაციო მაგალითი' labels: take every code block, title it by the
-    nearest preceding section-heading slide."""
-    z = zipfile.ZipFile(pptx)
-    out, heading, n = [], "", 0
-    for paras in slide_paragraphs(z):
-        body = [p for p in paras if p.strip() and not p.strip().startswith("პროფ.")]
-        labelled = any(CODE_LABEL_RE.match(l) for l in paras)
-        code = collect_code(paras, labelled)
+def collect_blocks(lines, labelled=False, with_pos=False):
+    """All code blocks of a page. Normal page: from each #include until main() is closed (a block must
+    contain main, so "#include <stack>" inside explanatory prose is ignored). Page carrying the
+    "კოდი code" label (slides): the whole listing, even without main. With with_pos=True the items are
+    (code, start_line_index)."""
+    blocks, i = [], 0
+    while i < len(lines):
+        code, nxt, start = _collect_from(lines, i, labelled)
         if code:
-            n += 1
-            title = f"{heading}: " if heading else ""
-            out.append({"n": n, "cond": f"{title}ლექციაში მოცემული პროგრამა (კოდი და შედეგი).".strip(),
-                        "code": code})
-        elif 1 <= len(body) <= 2 and len(body[0].strip()) <= 40 and not re.search(r"თ\s*ე\s*მ\s*ა|გმადლობთ|რეზიუმე", body[0]):
+            blocks.append((code, start))
+        if nxt <= i:
+            break
+        i = nxt
+        if labelled:
+            break
+    return blocks if with_pos else [c for c, _ in blocks]
+
+
+def collect_code(lines, labelled=False):
+    blocks = collect_blocks(lines, labelled)
+    return blocks[0] if blocks else []
+
+
+def heading_before(lines, upto):
+    """For PDF/Word pages: the last short heading-like line before index `upto` (no code characters,
+    not a sentence)."""
+    best = ""
+    for l in lines[:upto]:
+        t = l.strip()
+        if 2 <= len(t) <= 60 and not re.search(r"[;{}()=<>#]", t) and not re.fullmatch(r"[\d\W]+", t) \
+                and not t.endswith((".", ",", ";", "!", "?")) \
+                and not STOP_RE.match(t) and not CODE_LABEL_RE.match(t) and not EXAMPLE_RE.match(t):
+            best = t
+    return best
+
+
+def extract_unmarked(path):
+    """Lectures without 'საილუსტრაციო მაგალითი' labels: take every code block, title it by the
+    nearest preceding heading (a heading slide for pptx, a heading-like line for PDF/Word)."""
+    out, heading, n = [], "", 0
+    slides = is_slides(path)
+    for paras in pages(path):
+        body = [p for p in paras if p.strip() and not p.strip().startswith("პროფ.")]
+        labelled = slides and any(CODE_LABEL_RE.match(l) for l in paras)
+        blocks = collect_blocks(paras, labelled, with_pos=True)
+        if not blocks and not slides and any(CODE_LABEL_RE.match(l) for l in paras):
+            blocks = collect_blocks(paras, True, with_pos=True)        # "კოდი code" listing without main
+        if blocks:
+            for code, start in blocks:
+                if not slides:
+                    heading = heading_before(paras, start) or heading
+                n += 1
+                title = f"{heading}: " if heading else ""
+                out.append({"n": n, "cond": f"{title}ლექციაში მოცემული პროგრამა (კოდი და შედეგი).".strip(),
+                            "code": code})
+        elif slides and 1 <= len(body) <= 2 and len(body[0].strip()) <= 40 \
+                and not re.search(r"თ\s*ე\s*მ\s*ა|გმადლობთ|რეზიუმე", body[0]):
             heading = body[0].strip()
+        elif not slides:
+            heading = heading_before(paras, len(paras)) or heading
     return out
 
 
-def extract(pptx):
-    z = zipfile.ZipFile(pptx)
+def extract(path):
     examples, cur, in_code = [], None, False
-    for paras in slide_paragraphs(z):
+    wrapped = not is_slides(path)          # PDF/Word wrap the condition over several lines
+    for paras in pages(path):
         for line in paras:
             m = EXAMPLE_RE.match(line.strip())
             if m:
@@ -118,13 +209,16 @@ def extract(pptx):
                 if re.match(r"\s*#\s*include", line):
                     in_code = True
                 else:
+                    if (wrapped and not cur["code"] and line.strip() and len(cur["cond"]) < 700
+                            and not CODEY_RE.search(line) and not STOP_RE.match(line)):
+                        cur["cond"] = (cur["cond"] + " " + line.strip()).strip()
                     continue
             if STOP_RE.match(line):
                 cur = None if cur["code"] else cur
                 in_code = False
                 continue
             line = clean_slide_line(line)
-            if not line.strip():
+            if not line.strip() or re.fullmatch(r"\s*\d{1,3}\s*", line):
                 continue
             cur["code"].append(line)
             code_only = split_comment(line)[0]
@@ -332,15 +426,23 @@ def build_docx(examples, week, date, out, student, group, course):
                 z.write(os.path.join(d, n), n)
 
 
+def profile():
+    """Optional local ../profile.json {"student", "group", "course"} (not part of the repo)."""
+    try:
+        return json.load(open(os.path.join(HERE, "..", "profile.json"), encoding="utf8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("pptx")
+    ap.add_argument("pptx", help="lecture file: .pptx, .pdf or .docx")
     ap.add_argument("--week", required=True)
     ap.add_argument("--out")
     ap.add_argument("--date", default=datetime.date.today().strftime("%d.%m.%Y"))
-    ap.add_argument("--student", default=os.getenv("STUDENT_NAME", ""), help="default: $STUDENT_NAME")
-    ap.add_argument("--group", default=os.getenv("STUDENT_GROUP", ""), help="default: $STUDENT_GROUP")
-    ap.add_argument("--course", default=os.getenv("COURSE_NAME", ""), help="default: $COURSE_NAME")
+    ap.add_argument("--student", default=os.getenv("STUDENT_NAME") or profile().get("student", ""), help="default: $STUDENT_NAME")
+    ap.add_argument("--group", default=os.getenv("STUDENT_GROUP") or profile().get("group", ""), help="default: $STUDENT_GROUP")
+    ap.add_argument("--course", default=os.getenv("COURSE_NAME") or profile().get("course", ""), help="default: $COURSE_NAME")
     ap.add_argument("--no-shots", action="store_true", help="leave output boxes empty")
     ap.add_argument("--stdin", action="append", default=[], metavar="N=v1,v2,...",
                     help="keyboard input for example N, e.g. --stdin 6=2,3,5,7,4,6")
