@@ -36,23 +36,38 @@ def slide_paragraphs(z):
 
 
 # ---------- other sources: PDF and Word lectures ----------
-def pdf_pages(path):
-    """One list of lines per PDF page (pypdf, falling back to pdftotext). Bare page numbers are dropped."""
-    pages = []
+def pdf_pages(path, merged=True):
+    """Lines of a PDF. pypdf, falling back to pdftotext. Bare page numbers and running headers/footers
+    (prose lines repeated on most pages) are dropped, and the pages are merged into one stream: a
+    code listing very often continues over a page break. merged=False gives one list per page."""
+    texts = []
     try:
         from pypdf import PdfReader
-        pages = [(pg.extract_text() or "") for pg in PdfReader(path).pages]
+        texts = [(pg.extract_text() or "") for pg in PdfReader(path).pages]
     except Exception:
         pass
-    if not any(t.strip() for t in pages):
+    if not any(t.strip() for t in texts):
         try:
             out = subprocess.run(["pdftotext", "-layout", path, "-"], capture_output=True, text=True).stdout
-            pages = out.split("\f")
+            texts = out.split("\f")
         except OSError:
-            pages = []
-    for t in pages:
-        lines = [l.replace("\xa0", " ").rstrip() for l in t.split("\n")]
-        yield [l for l in lines if not re.fullmatch(r"\s*\d{1,3}\s*", l)]
+            texts = []
+    per_page = [[l.replace("\xa0", " ").rstrip() for l in t.split("\n")] for t in texts]
+    per_page = [[l for l in lines if not re.fullmatch(r"\s*\d{1,3}\s*", l)] for lines in per_page]
+    repeated = set()
+    if len(per_page) >= 2:
+        seen = {}
+        for lines in per_page:
+            for l in {x.strip() for x in lines}:
+                seen[l] = seen.get(l, 0) + 1
+        need = max(2, int(0.6 * len(per_page)))
+        repeated = {l for l, c in seen.items()
+                    if c >= need and len(l) >= 8 and not re.search(r"[;{}]", l) and not l.startswith("#")}
+    per_page = [[l for l in lines if l.strip() not in repeated] for lines in per_page]
+    if merged:
+        yield [l for lines in per_page for l in lines]
+    else:
+        yield from per_page
 
 
 def docx_pages(path):
@@ -61,18 +76,20 @@ def docx_pages(path):
     x = z.read("word/document.xml").decode("utf8")
     lines = []
     for p in re.findall(r"<w:p[ >].*?</w:p>", x, flags=re.S):
-        p = re.sub(r"<w:br[^>]*/>|<w:tab/>", "\n", p)
+        p = p.replace("<w:tab/>", "<w:t>    </w:t>")
+        p = re.sub(r"<w:br[^>]*/>", "\n", p)
         t = html.unescape("".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>|(\n)", p) and
                                   [a or b for a, b in re.findall(r"<w:t[^>]*>([^<]*)</w:t>|(\n)", p)]))
         lines.extend(t.replace("\xa0", " ").split("\n"))
     yield lines
 
 
-def pages(path):
-    """Lecture file -> iterator of pages (a page = list of text lines): pptx slides, PDF pages, or a docx."""
+def pages(path, merged=True):
+    """Lecture file -> iterator of pages (a page = list of text lines): pptx slides, a PDF (one merged
+    stream, or per page with merged=False), or a docx."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        return pdf_pages(path)
+        return pdf_pages(path, merged)
     if ext == ".docx":
         return docx_pages(path)
     return slide_paragraphs(zipfile.ZipFile(path))
@@ -100,7 +117,7 @@ CODE_LABEL_RE = re.compile(r"^\s*კოდი\s*-?\s*code\b", re.I)
 CODEY_RE = re.compile(r"[;{}]\s*(//.*)?$|^\s*#\s*include|^\s*(int|float|double|char|string|void|struct|using|for|while|if|return)\b")
 
 
-def _collect_from(lines, i0, labelled):
+def _collect_from(lines, i0, labelled, keep_blank=False):
     """One code block starting at/after lines[i0] -> (code_lines, index_after_block, start_index)."""
     code, depth, started, i, start = [], 0, False, i0, i0
     while i < len(lines):
@@ -115,12 +132,16 @@ def _collect_from(lines, i0, labelled):
             break
         line = clean_slide_line(line)
         if not line.strip() or re.fullmatch(r"\s*\d{1,3}\s*", line):
+            if keep_blank and code and code[-1] != "" and not line.strip():
+                code.append("")                     # one blank line between members (PDF/Word)
             continue
         code.append(line)
         code_only = split_comment(line)[0]
         depth += code_only.count("{") - code_only.count("}")
         if re.search(r"\bmain\b", " ".join(code)) and depth <= 0 and "}" in code_only:
             break
+    while code and code[-1] == "":
+        code.pop()
     if labelled:
         # drop trailing non-code lines (printed output etc.)
         while code and not CODEY_RE.search(code[-1]):
@@ -129,14 +150,14 @@ def _collect_from(lines, i0, labelled):
     return (code if re.search(r"\bmain\b", " ".join(code)) else []), i, start
 
 
-def collect_blocks(lines, labelled=False, with_pos=False):
+def collect_blocks(lines, labelled=False, with_pos=False, keep_blank=False):
     """All code blocks of a page. Normal page: from each #include until main() is closed (a block must
     contain main, so "#include <stack>" inside explanatory prose is ignored). Page carrying the
     "კოდი code" label (slides): the whole listing, even without main. With with_pos=True the items are
     (code, start_line_index)."""
     blocks, i = [], 0
     while i < len(lines):
-        code, nxt, start = _collect_from(lines, i, labelled)
+        code, nxt, start = _collect_from(lines, i, labelled, keep_blank)
         if code:
             blocks.append((code, start))
         if nxt <= i:
@@ -165,17 +186,17 @@ def heading_before(lines, upto):
     return best
 
 
-def extract_unmarked(path):
+def extract_unmarked(path, merged=True):
     """Lectures without 'საილუსტრაციო მაგალითი' labels: take every code block, title it by the
     nearest preceding heading (a heading slide for pptx, a heading-like line for PDF/Word)."""
     out, heading, n = [], "", 0
     slides = is_slides(path)
-    for paras in pages(path):
+    for paras in pages(path, merged):
         body = [p for p in paras if p.strip() and not p.strip().startswith("პროფ.")]
         labelled = slides and any(CODE_LABEL_RE.match(l) for l in paras)
-        blocks = collect_blocks(paras, labelled, with_pos=True)
+        blocks = collect_blocks(paras, labelled, with_pos=True, keep_blank=not slides)
         if not blocks and not slides and any(CODE_LABEL_RE.match(l) for l in paras):
-            blocks = collect_blocks(paras, True, with_pos=True)        # "კოდი code" listing without main
+            blocks = collect_blocks(paras, True, with_pos=True, keep_blank=True)   # "კოდი code" listing without main
         if blocks:
             for code, start in blocks:
                 if not slides:
@@ -192,10 +213,10 @@ def extract_unmarked(path):
     return out
 
 
-def extract(path):
+def extract(path, merged=True):
     examples, cur, in_code = [], None, False
     wrapped = not is_slides(path)          # PDF/Word wrap the condition over several lines
-    for paras in pages(path):
+    for paras in pages(path, merged):
         for line in paras:
             m = EXAMPLE_RE.match(line.strip())
             if m:
@@ -219,6 +240,8 @@ def extract(path):
                 continue
             line = clean_slide_line(line)
             if not line.strip() or re.fullmatch(r"\s*\d{1,3}\s*", line):
+                if wrapped and not line.strip() and cur["code"] and cur["code"][-1] != "":
+                    cur["code"].append("")
                 continue
             cur["code"].append(line)
             code_only = split_comment(line)[0]
@@ -304,7 +327,13 @@ def tidy_code(code):
     return s
 
 
-def tidy(lines):
+def tidy(lines, verbatim=False):
+    """Slides: rebuild the layout (spacing, Allman braces, 4-space indent). PDF/Word code that already has
+    its own indentation is kept as written (only typos/quotes are fixed)."""
+    if verbatim and any(re.match(r"\s+\S", l) for l in lines):
+        keep = [l for i, l in enumerate(lines)
+                if l.strip() or not (i + 1 < len(lines) and lines[i + 1].lstrip().startswith("}"))]
+        return [fix_typos(l).rstrip() for l in keep]
     flat = []
     for line in lines:
         code, comment = split_comment(line)
@@ -452,17 +481,22 @@ def main():
                               ("course (COURSE_NAME)", a.course)) if not v]
     if missing:
         sys.exit("Missing header data: " + ", ".join(missing) + " — pass --student/--group/--course or set the env vars.")
-    examples = extract(a.pptx)
-    if examples:
+    examples, labelled = [], True
+    for merged in ((True, False) if a.pptx.lower().endswith(".pdf") else (True,)):
+        examples = extract(a.pptx, merged)
+        if not examples:
+            examples, labelled = extract_unmarked(a.pptx, merged), False
+        if examples:
+            break
+    if examples and labelled:
         print(f"Found {len(examples)} examples")
     else:
-        examples = extract_unmarked(a.pptx)
         if not examples:
             sys.exit("ლექციაში კოდი ვერ ვიპოვე (არც 'საილუსტრაციო მაგალითი', არც #include ბლოკი).")
         print(f"No 'საილუსტრაციო მაგალითი' labels — using {len(examples)} code block(s) found in the slides")
     bad = 0
     for e in examples:
-        e["code"] = tidy(e["code"])
+        e["code"] = tidy(e["code"], verbatim=not is_slides(a.pptx))
         bad += not syntax_check(e["code"], f"მაგალითი {e['n']}")
     if not a.no_shots:
         from PIL import Image
