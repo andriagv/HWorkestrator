@@ -31,11 +31,11 @@ def test_cppwork_moodle_end_to_end(monkeypatch, tmp_path):
     assert fake.submitted == (999, "დავალება IV - Test Student.docx")
 
 
-def test_a_pptx_skill_needs_a_pptx_among_chosen_files(tmp_path):
-    ov = pipeline.Overview("dsa", 4, "t", "x", files=[tmp_path / "task.pdf"], intro="y" * 30,
+def test_a_lecture_skill_needs_a_lecture_file_among_chosen_files(tmp_path):
+    ov = pipeline.Overview("dsa", 4, "t", "x", files=[tmp_path / "notes.txt"], intro="y" * 30,
                            targets=[{"kind": "moodle", "assignment_id": 1}])
-    with pytest.raises(pipeline.PipelineError):
-        pipeline.prepare(ov, "cppwork", chosen=[tmp_path / "task.pdf"])
+    with pytest.raises(pipeline.PipelineError):                   # .txt is not a lecture
+        pipeline.prepare(ov, "cppwork", chosen=[tmp_path / "notes.txt"])
 
 
 def test_unknown_skill_is_rejected(tmp_path):
@@ -48,7 +48,7 @@ def test_every_skill_follows_the_contract():
     from hworkestrator.registry import SKILLS
     for name in SKILLS:
         r = skills.load(name)
-        assert r.NEEDS in ("text", "pptx") and callable(r.run)
+        assert r.NEEDS in ("text", "lecture") and callable(r.run)
         if r.USES_LLM:
             calls = r.estimate(1000, ["M", "L"])
             assert calls and all(i > 0 and o > 0 for i, o in calls)
@@ -136,3 +136,60 @@ def test_splice_answers_replaces_only_the_answer_blocks():
     assert out.count("print(") == 2 and "## დავალება 2" in out
     with pytest.raises(ValueError):
         jupiterwork.splice_answers(src, {7: "x"})
+
+
+# ---------------------------------------------------------------- cppwork: PDF / Word lectures
+def _cppwork():
+    import importlib.util, pathlib
+    spec = importlib.util.spec_from_file_location(
+        "cppwork_build", pathlib.Path(__file__).parent.parent / "hworkestrator/skills/cppwork/scripts/build.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _mini_docx(path, paragraphs):
+    import zipfile
+    body = "".join(f"<w:p><w:r><w:t xml:space=\"preserve\">{p}</w:t></w:r></w:p>" for p in paragraphs)
+    xml = ('<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           f"<w:body>{body}</w:body></w:document>")
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("word/document.xml", xml)
+
+
+def test_cppwork_reads_word_lectures_marked_and_unmarked(tmp_path):
+    b = _cppwork()
+    marked = tmp_path / "m.docx"
+    _mini_docx(marked, ["საილუსტრაციო მაგალითი_1: დაწერეთ კოდი,", "რომელიც ბეჭდავს ორ რიცხვს.",
+                        "#include &lt;iostream&gt;", "using namespace std;", "int main()", "{",
+                        "cout &lt;&lt; “hi” &lt;&lt; endl;", "return 0;", "}", "შედეგი: hi"])
+    ex = b.extract(str(marked))
+    assert len(ex) == 1 and "ორ რიცხვს" in ex[0]["cond"]                  # wrapped condition is joined
+    code = "\n".join(b.tidy(ex[0]["code"]))
+    assert 'cout << "hi" << endl;' in code and "“" not in code           # smart quotes fixed
+
+    plain = tmp_path / "u.docx"
+    _mini_docx(plain, ["სტეკი", "კოდი code", "#include &lt;iostream&gt;", "int main()", "{", "return 0;", "}",
+                       "რიგი", "#include &lt;iostream&gt;", "int main()", "{", "return 0;", "}"])
+    blocks = b.extract_unmarked(str(plain))
+    assert [x["cond"].split(":")[0] for x in blocks] == ["სტეკი", "რიგი"]
+
+
+def test_cppwork_reads_pdf_pages_and_drops_page_numbers(monkeypatch, tmp_path):
+    b = _cppwork()
+    import pypdf
+
+    class FakePage:
+        def __init__(self, t): self.t = t
+        def extract_text(self): return self.t
+
+    class FakeReader:
+        def __init__(self, path):
+            self.pages = [FakePage("საილუსტრაციო მაგალითი_3: ჯამი\n#include <iostream>\nint main()\n{\n3\nreturn 0;\n}\nშედეგი: 0\n12")]
+
+    monkeypatch.setattr(pypdf, "PdfReader", FakeReader)
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    ex = b.extract(str(pdf))
+    assert len(ex) == 1 and ex[0]["n"] == 3
+    assert ex[0]["code"] == ["#include <iostream>", "int main()", "{", "return 0;", "}"]   # lone "3" dropped
