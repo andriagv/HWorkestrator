@@ -221,3 +221,17 @@ def test_cppwork_pdf_code_continues_over_a_page_break_and_keeps_its_layout(monke
     assert head not in "\n".join(code)                      # running header removed
     assert "    int data;" in code and code[-1] == "}"       # own indentation kept, block spans the page break
     assert code[code.index("};") - 1] != ""                  # no blank line right before a closing brace
+
+
+def test_cppwork_copies_pdf_and_word_code_exactly(tmp_path):
+    """Lecturers expect the code from a PDF/Word lecture 1:1: block comments, Georgian text after a
+    statement and odd spacing must not be 'cleaned'."""
+    b = _cppwork()
+    doc = tmp_path / "x.docx"
+    _mini_docx(doc, ["საილუსტრაციო მაგალითი_1: ტესტი", "#include &lt;iostream&gt;", "int main() {",
+                     "  /* პირველი ხაზი", "     მეორე ხაზი */", "  int  x =  5;   // ხუთი",
+                     "  cout &lt;&lt; x ;  ბეჭდავს", "  return 0;", "}"])
+    ex = b.extract(str(doc))[0]
+    code = b.tidy(ex["code"], verbatim=True)
+    assert code == ["#include <iostream>", "int main() {", "  /* პირველი ხაზი", "     მეორე ხაზი */",
+                    "  int  x =  5;   // ხუთი", "  cout << x ;  ბეჭდავს", "  return 0;", "}"]
